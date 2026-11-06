@@ -54,7 +54,124 @@ static bool RunRemoteProc(HANDLE hProcess, LPTHREAD_START_ROUTINE fn, LPVOID arg
     return true;
 }
 
-
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    wchar_t selfPath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, selfPath, MAX_PATH);
+    PathRemoveFileSpecW(selfPath);
+
+    std::wstring baseDir(selfPath);
+
+    wchar_t exeBuf[MAX_PATH] = {};
+    wchar_t argsBuf[1024] = {};
+    if (FileExistsW(baseDir + L"\\WE_DarkMode.ini")) {
+        GetPrivateProfileStringW(L"General", L"WorldEditPath", L"", exeBuf, MAX_PATH, baseDir + L"\\WE_DarkMode.ini".c_str());
+        GetPrivateProfileStringW(L"General", L"Arguments", L"", argsBuf, 1024, baseDir + L"\\WE_DarkMode.ini".c_str());
+    }
+
+    std::wstring targetExe = exeBuf;
+    std::wstring extraArgs = argsBuf;
+
+    // 3. Support drag-and-drop of either an .exe (e.g. worldedit121.exe) or a .w3x/.w3m map
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 2) {
+        std::wstring arg1 = argv[1];
+        const wchar_t* ext = PathFindExtensionW(arg1.c_str());
+        if (ext && _wcsicmp(ext, L".exe") == 0 && FileExistsW(arg1)) {
+            targetExe = arg1;
+        } else if (ext && (_wcsicmp(ext, L".w3x") == 0 || _wcsicmp(ext, L".w3m") == 0) && FileExistsW(arg1)) {
+            if (!extraArgs.empty()) extraArgs += L" ";
+            extraArgs += L"-loadfile \"" + arg1 + L"\"";
+        }
+    }
+    if (argv) LocalFree(argv);
+
+    // 4. Portable auto-detection: check worldedit.exe / worldedit121.exe right beside WorldEditor_Dark.exe
+    if (targetExe.empty() || !FileExistsW(targetExe)) {
+        std::wstring localWe    = baseDir + L"\\worldedit.exe";
+        std::wstring localWe121 = baseDir + L"\\worldedit121.exe";
+        if (FileExistsW(localWe)) {
+            targetExe = localWe;
+        } else if (FileExistsW(localWe121)) {
+            targetExe = localWe121;
+        } else {
+            if (!BrowseForWorldEditExe(targetExe)) {
+                return 0;
+            }
+            WritePrivateProfileStringW(L"General", L"WorldEditPath", targetExe.c_str(), baseDir + L"\\WE_DarkMode.ini".c_str());
+        }
+    }
+
+    // Working directory = Warcraft III folder
+    wchar_t workDirBuf[MAX_PATH] = {};
+    wcsncpy(workDirBuf, targetExe.c_str(), MAX_PATH - 1);
+    PathRemoveFileSpecW(workDirBuf);
+
+    std::wstring cmdLine = L"\"" + targetExe + L"\"";
+    if (!extraArgs.empty()) {
+        cmdLine += L" " + extraArgs;
+    }
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+
+    if (!CreateProcessW(
+            targetExe.c_str(),
+            cmdLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_SUSPENDED,
+            nullptr,
+            workDirBuf,
+            &si,
+            &pi))
+    {
+        std::wstring msg = L"No se pudo iniciar:\n" + targetExe + L"\n\nCódigo de error: " + std::to_wstring(GetLastError());
+        MessageBoxW(nullptr, msg.c_str(), L"World Editor Dark Mode", MB_OK | MB_ICONERROR);
+        return 2;
+    }
+
+    bool ok = false;
+    SIZE_T byteLen = (baseDir + L"\\WE_DarkMode.dll".size() + 1) * sizeof(wchar_t);
+    LPVOID remotePath = VirtualAllocEx(pi.hProcess, nullptr, byteLen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (remotePath) {
+        if (WriteProcessMemory(pi.hProcess, remotePath, baseDir + L"\\WE_DarkMode.dll".c_str(), byteLen, nullptr)) {
+            HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
+            auto pLoadLibW = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(hKernel, "LoadLibraryW"));
+
+            DWORD remoteDllBase = 0;
+            if (pLoadLibW && RunRemoteProc(pi.hProcess, pLoadLibW, remotePath, &remoteDllBase) && remoteDllBase != 0) {
+                HMODULE hLocal = LoadLibraryExW(baseDir + L"\\WE_DarkMode.dll".c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+                if (hLocal) {
+                    auto pLocalInit = reinterpret_cast<uintptr_t>(GetProcAddress(hLocal, "InitializeDarkMode"));
+                    if (pLocalInit) {
+                        uintptr_t rva = pLocalInit - reinterpret_cast<uintptr_t>(hLocal);
+                        auto pRemoteInit = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+                            static_cast<uintptr_t>(remoteDllBase) + rva);
+                        RunRemoteProc(pi.hProcess, pRemoteInit, reinterpret_cast<LPVOID>(static_cast<uintptr_t>(pi.dwThreadId)));
+                        ok = true;
+                    }
+                    FreeLibrary(hLocal);
+                }
+            }
+        }
+        VirtualFreeEx(pi.hProcess, remotePath, 0, MEM_RELEASE);
+    }
+
+    ResumeThread(pi.hThread);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (!ok) {
+        MessageBoxW(
+            nullptr,
+            L"World Editor se abrió, pero no se pudo inicializar WE_DarkMode.dll.\nVerifica que worldedit.exe sea de 32 bits (WC3 1.21–1.27b).",
+            L"World Editor Dark Mode",
+            MB_OK | MB_ICONWARNING);
+        return 3;
+    }
+
     return 0;
 }

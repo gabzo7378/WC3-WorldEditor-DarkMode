@@ -153,5 +153,145 @@ static volatile LONG gInitialized = 0;
 static thread_local HHOOK tCbtHook = nullptr;
 static HWND gHoveredCtrl = nullptr;
 
+static fnAllowDarkModeForWindow gAllowDarkModeForWindow = nullptr;
+static fnSetPreferredAppMode    gSetPreferredAppMode    = nullptr;
+static fnFlushMenuThemes        gFlushMenuThemes        = nullptr;
+static fnRefreshImmersivePolicy gRefreshImmersivePolicy = nullptr;
+static fnDwmSetWindowAttribute  gDwmSetWindowAttribute  = nullptr;
+
+static COLORREF gColBg         = RGB(0x18, 0x18, 0x18);
+static COLORREF gColSurface    = RGB(0x1E, 0x1E, 0x1E);
+static COLORREF gColInput      = RGB(0x12, 0x12, 0x12);
+static COLORREF gColButton     = RGB(0x26, 0x26, 0x2A);
+static COLORREF gColText       = RGB(0xEA, 0xEA, 0xEA);
+static COLORREF gColMutedText  = RGB(0x8A, 0x8A, 0x8A);
+static COLORREF gColAccent     = RGB(0x26, 0x4F, 0x78);
+static COLORREF gColHover      = RGB(0x30, 0x30, 0x36);
+static COLORREF gColBorder     = RGB(0x38, 0x38, 0x38);
+static COLORREF gColDarkShadow = RGB(0x0D, 0x0D, 0x0D);
+
+static HBRUSH gBrushBg      = nullptr;
+static HBRUSH gBrushSurface = nullptr;
+static HBRUSH gBrushInput   = nullptr;
+static HBRUSH gBrushButton  = nullptr;
+static HBRUSH gBrushAccent  = nullptr;
+static HBRUSH gBrushHover   = nullptr;
+static HBRUSH gBrushBorder  = nullptr;
+
+static COLORREF gSysColors[32]        = {};
+static HBRUSH   gSysBrushes[32]       = {};
+static bool     gSysColorOverride[32] = {};
+
+static constexpr UINT_PTR kContainerSubclassId = 0x5745444D;
+static constexpr UINT_PTR kHeaderSubclassId    = 0x57454448;
+static constexpr UINT_PTR kTabSubclassId       = 0x57454454;
+static constexpr UINT_PTR kButtonSubclassId    = 0x57454442;
+static constexpr UINT_PTR kUpDownSubclassId    = 0x57454455;
+
+static thread_local bool gInThemeRedirect = false;
+static thread_local bool gInStyleWindow   = false;
+static thread_local bool gInInternalDraw  = false;
+
+// ============================================================================
+// INI & Palette Loader
+// ============================================================================
+static COLORREF ParseHexRgb(const wchar_t* text, COLORREF fallback) {
+    if (!text || !*text) return fallback;
+    while (*text == L' ' || *text == L'#') ++text;
+    wchar_t* end = nullptr;
+    unsigned long val = wcstoul(text, &end, 16);
+    if (end == text) return fallback;
+    return RGB((val >> 16) & 0xFF, (val >> 8) & 0xFF, val & 0xFF);
+}
+
+static COLORREF ReadIniColor(const wchar_t* iniPath, const wchar_t* key, COLORREF fallback) {
+    wchar_t buf[64] = {};
+    DWORD n = GetPrivateProfileStringW(L"Colors", key, L"", buf, 64, iniPath);
+    return n > 0 ? ParseHexRgb(buf, fallback) : fallback;
+}
+
+static void LoadPaletteAndBrushes() {
+    wchar_t dllPath[MAX_PATH] = {};
+    if (GetModuleFileNameW(gSelfModule, dllPath, MAX_PATH) > 0) {
+        PathRemoveFileSpecW(dllPath);
+        wchar_t iniPath[MAX_PATH] = {};
+        PathCombineW(iniPath, dllPath, L"WE_DarkMode.ini");
+        if (GetFileAttributesW(iniPath) != INVALID_FILE_ATTRIBUTES) {
+            gColBg        = ReadIniColor(iniPath, L"BgColor",        gColBg);
+            gColSurface   = ReadIniColor(iniPath, L"SurfaceColor",   gColSurface);
+            gColInput     = ReadIniColor(iniPath, L"InputColor",     gColInput);
+            gColText      = ReadIniColor(iniPath, L"TextColor",      gColText);
+            gColMutedText = ReadIniColor(iniPath, L"MutedTextColor", gColMutedText);
+            gColAccent    = ReadIniColor(iniPath, L"AccentColor",    gColAccent);
+            gColHover     = ReadIniColor(iniPath, L"HoverColor",     gColHover);
+            gColBorder    = ReadIniColor(iniPath, L"BorderColor",    gColBorder);
+        }
+    }
+
+    gBrushBg      = CreateSolidBrush(gColBg);
+    gBrushSurface = CreateSolidBrush(gColSurface);
+    gBrushInput   = CreateSolidBrush(gColInput);
+    gBrushButton  = CreateSolidBrush(gColButton);
+    gBrushAccent  = CreateSolidBrush(gColAccent);
+    gBrushHover   = CreateSolidBrush(gColHover);
+    gBrushBorder  = CreateSolidBrush(gColBorder);
+
+    auto setSys = [](int idx, COLORREF col) {
+        if (idx >= 0 && idx < 32) {
+            gSysColors[idx] = col;
+            gSysBrushes[idx] = CreateSolidBrush(col);
+            gSysColorOverride[idx] = true;
+        }
+    };
+
+    setSys(COLOR_SCROLLBAR,               gColSurface);
+    setSys(COLOR_BACKGROUND,              gColBg);
+    setSys(COLOR_ACTIVECAPTION,           gColSurface);
+    setSys(COLOR_INACTIVECAPTION,         gColBg);
+    setSys(COLOR_MENU,                    gColSurface);
+    setSys(COLOR_WINDOW,                  gColSurface);
+    setSys(COLOR_WINDOWFRAME,             gColBorder);
+    setSys(COLOR_MENUTEXT,                gColText);
+    setSys(COLOR_WINDOWTEXT,              gColText);
+    setSys(COLOR_CAPTIONTEXT,             gColText);
+    setSys(COLOR_ACTIVEBORDER,            gColBorder);
+    setSys(COLOR_INACTIVEBORDER,          gColBg);
+    setSys(COLOR_APPWORKSPACE,            gColDarkShadow);
+    setSys(COLOR_HIGHLIGHT,               gColAccent);
+    setSys(COLOR_HIGHLIGHTTEXT,           RGB(0xFF, 0xFF, 0xFF));
+    setSys(COLOR_BTNFACE,                 gColBg);
+    setSys(COLOR_BTNSHADOW,               gColBorder);
+    setSys(COLOR_GRAYTEXT,                gColMutedText);
+    setSys(COLOR_BTNTEXT,                 gColText);
+    setSys(COLOR_INACTIVECAPTIONTEXT,     gColMutedText);
+    setSys(COLOR_BTNHIGHLIGHT,            gColBorder);
+    setSys(COLOR_3DDKSHADOW,              gColDarkShadow);
+    setSys(COLOR_3DLIGHT,                 gColSurface);
+    setSys(COLOR_INFOTEXT,                gColText);
+    setSys(COLOR_INFOBK,                  gColSurface);
+    setSys(COLOR_HOTLIGHT,                RGB(0x66, 0xB2, 0xFF));
+    setSys(COLOR_GRADIENTACTIVECAPTION,   gColSurface);
+    setSys(COLOR_GRADIENTINACTIVECAPTION, gColBg);
+    setSys(COLOR_MENUHILIGHT,             gColAccent);
+    setSys(COLOR_MENUBAR,                 gColSurface);
+}
+
+static int RawFillRect(HDC hdc, const RECT* rc, HBRUSH hbr) {
+    if (gHpFillRect.origEntry) {
+        return reinterpret_cast<fnFillRect>(gHpFillRect.origEntry)(hdc, rc, hbr);
+    }
+    return FillRect(hdc, rc, hbr);
+}
+
+static void Draw1PxBorder(HDC hdc, const RECT& rc, COLORREF col) {
+    HBRUSH br = CreateSolidBrush(col);
+    RECT t = { rc.left, rc.top, rc.right, rc.top + 1 };
+    RECT b = { rc.left, rc.bottom - 1, rc.right, rc.bottom };
+    RECT l = { rc.left, rc.top, rc.left + 1, rc.bottom };
+    RECT r = { rc.right - 1, rc.top, rc.right, rc.bottom };
+    RawFillRect(hdc, &t, br);
+    RawFillRect(hdc, &b, br);
+    RawFillRect(hdc, &l, br);
+    RawFillRect(hdc, &r, br);
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

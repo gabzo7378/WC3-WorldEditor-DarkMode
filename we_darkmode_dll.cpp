@@ -293,5 +293,50 @@ static void Draw1PxBorder(HDC hdc, const RECT& rc, COLORREF col) {
     RawFillRect(hdc, &b, br);
     RawFillRect(hdc, &l, br);
     RawFillRect(hdc, &r, br);
+    DeleteObject(br);
+}
+
+// ============================================================================
+// Dark Readability Helper (fixes hardcoded black / dark purple / dark blue text)
+// ============================================================================
+static COLORREF LiftColorForDarkBg(COLORREF col) {
+    if (col == CLR_DEFAULT || col == CLR_NONE)
+        return gColText;
+
+    BYTE r = GetRValue(col);
+    BYTE g = GetGValue(col);
+    BYTE b = GetBValue(col);
+    int luma = (r * 299 + g * 587 + b * 114) / 1000;
+
+    if (r < 45 && g < 45 && b < 45)
+        return gColText;
+
+    // Dark purple/magenta (WC3 Object Editor modified fields) -> bright lavender
+    if (r > 70 && b > 70 && g < 60 && luma < 120)
+        return RGB(0xDF, 0x8F, 0xFF);
+
+    // Dark blue (WC3 Trigger Editor links) -> bright sky blue
+    if (b > 90 && r < 70 && g < 90 && luma < 130)
+        return RGB(0x6C, 0xB8, 0xFF);
+
+    // Dark red -> readable coral red
+    if (r > 90 && g < 60 && b < 60 && luma < 120)
+        return RGB(0xFF, 0x70, 0x70);
+
+    // Dark green (Trigger comments) -> readable mint green
+    if (g > 70 && r < 60 && b < 60 && luma < 130)
+        return RGB(0x6A, 0xD8, 0x7A);
+
+    if (luma < 95) {
+        int nr = r + 115; if (nr > 235) nr = 235;
+        int ng = g + 115; if (ng > 235) ng = 235;
+        int nb = b + 115; if (nb > 235) nb = 235;
+        return RGB(nr, ng, nb);
+    }
+
+    return col;
+}
+
+// ============================================================================
 
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

@@ -338,5 +338,182 @@ static COLORREF LiftColorForDarkBg(COLORREF col) {
 }
 
 // ============================================================================
+// Alpha-Aware Toolbar Icon Renderer (fixes black-shadow disabled icons & black outlines)
+// ============================================================================
+static void DrawToolbarIconSmart(HDC hdcDest, int destX, int destY, HIMAGELIST hImg, int imgIdx, bool enabled, COLORREF bgCol) {
+    int cx = 16, cy = 16;
+    if (!ImageList_GetIconSize(hImg, &cx, &cy) || cx <= 0 || cy <= 0 || cx > 64 || cy > 64) {
+        ImageList_Draw(hImg, imgIdx, hdcDest, destX, destY, ILD_TRANSPARENT);
+        return;
+    }
 
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth       = cx;
+    bmi.bmiHeader.biHeight      = -cy; // top-down
+    bmi.bmiHeader.biPlanes      = 1;
+    bmi.bmiHeader.biBitCount    = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    uint32_t* pxBlack = nullptr;
+    uint32_t* pxWhite = nullptr;
+    HDC memDC = CreateCompatibleDC(hdcDest);
+    HBITMAP hbmBlack = CreateDIBSection(hdcDest, &bmi, DIB_RGB_COLORS, reinterpret_cast<void**>(&pxBlack), nullptr, 0);
+    HBITMAP hbmWhite = CreateDIBSection(hdcDest, &bmi, DIB_RGB_COLORS, reinterpret_cast<void**>(&pxWhite), nullptr, 0);
+
+    if (!memDC || !hbmBlack || !hbmWhite || !pxBlack || !pxWhite) {
+        if (hbmBlack) DeleteObject(hbmBlack);
+        if (hbmWhite) DeleteObject(hbmWhite);
+        if (memDC) DeleteDC(memDC);
+        ImageList_Draw(hImg, imgIdx, hdcDest, destX, destY, ILD_TRANSPARENT);
+        return;
+    }
+
+    const int count = cx * cy;
+    memset(pxBlack, 0x00, count * sizeof(uint32_t));
+    for (int i = 0; i < count; ++i) pxWhite[i] = 0x00FFFFFF;
+
+    gInInternalDraw = true;
+    HGDIOBJ oldBm = SelectObject(memDC, hbmBlack);
+    ImageList_Draw(hImg, imgIdx, memDC, 0, 0, ILD_TRANSPARENT);
+    SelectObject(memDC, hbmWhite);
+    ImageList_Draw(hImg, imgIdx, memDC, 0, 0, ILD_TRANSPARENT);
+    gInInternalDraw = false;
+
+    // Check if an enabled icon is pure near-black monochrome (like the dashed Selection box)
+    bool allDarkMono = true;
+    int fgPixels = 0;
+    for (int i = 0; i < count; ++i) {
+        uint32_t b = pxBlack[i] & 0x00FFFFFF;
+        uint32_t w = pxWhite[i] & 0x00FFFFFF;
+        int bR = (b >> 16) & 0xFF, bG = (b >> 8) & 0xFF, bB = b & 0xFF;
+        int wR = (w >> 16) & 0xFF, wG = (w >> 8) & 0xFF, wB = w & 0xFF;
+        int alpha = 255 - ((wR - bR) + (wG - bG) + (wB - bB)) / 3;
+        if (alpha > 20) {
+            ++fgPixels;
+            if (bR > 55 || bG > 55 || bB > 55) {
+                allDarkMono = false;
+            }
+        }
+    }
+
+    const int bgR = GetRValue(bgCol);
+    const int bgG = GetGValue(bgCol);
+    const int bgB = GetBValue(bgCol);
+
+    for (int i = 0; i < count; ++i) {
+        uint32_t b = pxBlack[i] & 0x00FFFFFF;
+        uint32_t w = pxWhite[i] & 0x00FFFFFF;
+        int bR = (b >> 16) & 0xFF, bG = (b >> 8) & 0xFF, bB = b & 0xFF;
+        int wR = (w >> 16) & 0xFF, wG = (w >> 8) & 0xFF, wB = w & 0xFF;
+        int alpha = 255 - ((wR - bR) + (wG - bG) + (wB - bB)) / 3;
+        if (alpha < 0) alpha = 0;
+        if (alpha > 255) alpha = 255;
+
+        if (alpha <= 12) {
+            pxBlack[i] = (bgR << 16) | (bgG << 8) | bgB;
+            continue;
+        }
+
+        // Recover unpremultiplied icon RGB
+        int srcR = (alpha > 0) ? (bR * 255) / alpha : 0;
+        int srcG = (alpha > 0) ? (bG * 255) / alpha : 0;
+        int srcB = (alpha > 0) ? (bB * 255) / alpha : 0;
+        if (srcR > 255) srcR = 255;
+        if (srcG > 255) srcG = 255;
+        if (srcB > 255) srcB = 255;
+
+        int outR = srcR, outG = srcG, outB = srcB;
+        if (!enabled) {
+            // Disabled toolbar icon: clear, recognizable muted silver + 30% original color tint
+            // Lifts black/dark-gray strokes (Cut scissors, Undo/Redo arrows) so they never look like shadows!
+            int luma = (srcR * 299 + srcG * 587 + srcB * 114) / 1000;
+            int lifted = 148 + (luma * 52) / 255; // 148..200 crisp visible silver range on #181818
+            outR = (lifted * 78 + srcR * 22) / 100;
+            outG = (lifted * 78 + srcG * 22) / 100;
+            outB = (lifted * 78 + srcB * 22) / 100;
+            alpha = (alpha * 215) / 255;
+        } else if (fgPixels > 0 && allDarkMono) {
+            // Pure-black monochrome icon (e.g. Selection marquee box) -> crisp light gray
+            outR = 0xDC;
+            outG = 0xDC;
+            outB = 0xE0;
+        }
+
+        int finR = (outR * alpha + bgR * (255 - alpha)) / 255;
+        int finG = (outG * alpha + bgG * (255 - alpha)) / 255;
+        int finB = (outB * alpha + bgB * (255 - alpha)) / 255;
+        pxBlack[i] = (finR << 16) | (finG << 8) | finB;
+    }
+
+    SelectObject(memDC, hbmBlack);
+    BitBlt(hdcDest, destX, destY, cx, cy, memDC, 0, 0, SRCCOPY);
+    SelectObject(memDC, oldBm);
+
+    DeleteObject(hbmBlack);
+    DeleteObject(hbmWhite);
+    DeleteDC(memDC);
+}
+
+// ============================================================================
+// Dark Title Bar + UAH Menu Bar & Left-Aligned Popup Menus
+// ============================================================================
+static void EnableDarkTitleBar(HWND hwnd) {
+    if (gAllowDarkModeForWindow) {
+        gAllowDarkModeForWindow(hwnd, TRUE);
+    }
+    if (gDwmSetWindowAttribute) {
+        BOOL dark = TRUE;
+        if (FAILED(gDwmSetWindowAttribute(hwnd, kDwmUseImmersiveDarkMode, &dark, sizeof(dark)))) {
+            gDwmSetWindowAttribute(hwnd, kDwmUseImmersiveDarkModeBefore20H1, &dark, sizeof(dark));
+        }
+    }
+}
+
+static void DrawMenuBarBottomHairline(HWND hwnd) {
+    MENUBARINFO mbi = {};
+    mbi.cbSize = sizeof(mbi);
+    if (!GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi))
+        return;
+
+    RECT rcWin = {};
+    GetWindowRect(hwnd, &rcWin);
+    RECT rcLine = mbi.rcBar;
+    OffsetRect(&rcLine, -rcWin.left, -rcWin.top);
+    rcLine.top = rcLine.bottom;
+    rcLine.bottom = rcLine.top + 1;
+
+    HDC hdc = GetWindowDC(hwnd);
+    if (hdc) {
+        RawFillRect(hdc, &rcLine, gBrushBorder);
+        ReleaseDC(hwnd, hdc);
+    }
+}
+
+static bool HandleUahMenuMessage(HWND hwnd, UINT msg, WPARAM /*wParam*/, LPARAM lParam, LRESULT* lr) {
+    HMENU hMainMenu = GetMenu(hwnd);
+
+    if (msg == kWmUahDrawMenu) {
+        auto* pUDM = reinterpret_cast<UAHMENU*>(lParam);
+        if (!pUDM || !pUDM->hdc) return false;
+
+        if (hMainMenu != nullptr && pUDM->hmenu == hMainMenu) {
+            MENUBARINFO mbi = {};
+            mbi.cbSize = sizeof(mbi);
+            if (!GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mbi))
+                return false;
+
+            RECT rcWin = {};
+            GetWindowRect(hwnd, &rcWin);
+            RECT rcBar = mbi.rcBar;
+            OffsetRect(&rcBar, -rcWin.left, -rcWin.top);
+            RawFillRect(pUDM->hdc, &rcBar, gBrushSurface);
+        } else {
+            RECT rcClip = {};
+            GetClipBox(pUDM->hdc, &rcClip);
+            RawFillRect(pUDM->hdc, &rcClip, gBrushSurface);
+        }
+
+}
+}
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

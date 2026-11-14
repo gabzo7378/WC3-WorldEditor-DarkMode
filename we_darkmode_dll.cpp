@@ -513,7 +513,494 @@ static bool HandleUahMenuMessage(HWND hwnd, UINT msg, WPARAM /*wParam*/, LPARAM 
             GetClipBox(pUDM->hdc, &rcClip);
             RawFillRect(pUDM->hdc, &rcClip, gBrushSurface);
         }
+        *lr = 0;
+        return true;
+    }
 
+    if (msg == kWmUahDrawMenuItem) {
+        auto* pUDMI = reinterpret_cast<UAHDRAWMENUITEM*>(lParam);
+        if (!pUDMI || !pUDMI->um.hdc) return false;
+
+        const bool isMenuBar = (hMainMenu != nullptr && pUDMI->um.hmenu == hMainMenu);
+        HDC hdc = pUDMI->um.hdc;
+        RECT rc = pUDMI->dis.rcItem;
+
+        wchar_t menuText[256] = {};
+        MENUITEMINFOW mii = {};
+        mii.cbSize     = sizeof(mii);
+        mii.fMask      = MIIM_FTYPE | MIIM_STATE | MIIM_SUBMENU | MIIM_STRING;
+        mii.dwTypeData = menuText;
+        mii.cch        = 255;
+        GetMenuItemInfoW(pUDMI->um.hmenu, pUDMI->umi.iPosition, TRUE, &mii);
+
+        UINT state = pUDMI->dis.itemState;
+        bool disabled = (state & (ODS_DISABLED | ODS_GRAYED)) != 0 || (mii.fState & (MFS_DISABLED | MFS_GRAYED)) != 0;
+        bool inactive = (state & ODS_INACTIVE) != 0;
+        bool selected = (state & ODS_SELECTED) != 0;
+        bool hot      = (state & ODS_HOTLIGHT) != 0;
+
+        if (isMenuBar) {
+            HBRUSH bg = gBrushSurface;
+            if (selected) bg = gBrushAccent;
+            else if (hot) bg = gBrushHover;
+            RawFillRect(hdc, &rc, bg);
+
+            NONCLIENTMETRICSW ncm = {};
+            ncm.cbSize = sizeof(ncm);
+            HFONT hFont = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)
+                              ? CreateFontIndirectW(&ncm.lfMenuFont) : nullptr;
+            HFONT oldFont = hFont ? static_cast<HFONT>(SelectObject(hdc, hFont)) : nullptr;
+
+            int oldBk = SetBkMode(hdc, TRANSPARENT);
+            COLORREF oldTxt = SetTextColor(hdc, (disabled || inactive) ? gColMutedText : gColText);
+            DWORD dtFlags = DT_CENTER | DT_SINGLELINE | DT_VCENTER | ((state & ODS_NOACCEL) ? DT_HIDEPREFIX : 0);
+            DrawTextW(hdc, menuText, -1, &rc, dtFlags);
+
+            SetTextColor(hdc, oldTxt);
+            SetBkMode(hdc, oldBk);
+            if (oldFont) SelectObject(hdc, oldFont);
+            if (hFont) DeleteObject(hFont);
+        } else {
+            // Popup dropdown / context menu: left-aligned text + right-aligned shortcut + separators + checks
+            RawFillRect(hdc, &rc, gBrushSurface);
+
+            if ((mii.fType & MFT_SEPARATOR) != 0) {
+                int midY = (rc.top + rc.bottom) / 2;
+                RECT rcSep = { rc.left + 28, midY, rc.right - 8, midY + 1 };
+                RawFillRect(hdc, &rcSep, gBrushBorder);
+                *lr = 0;
+                return true;
+            }
+
+            if ((selected || hot) && !disabled) {
+                RECT rcSel = { rc.left + 2, rc.top + 1, rc.right - 2, rc.bottom - 1 };
+                RawFillRect(hdc, &rcSel, gBrushAccent);
+            } else if (selected || hot) {
+                RECT rcSel = { rc.left + 2, rc.top + 1, rc.right - 2, rc.bottom - 1 };
+                RawFillRect(hdc, &rcSel, gBrushHover);
+            }
+
+            // Checkmark or Radio bullet in left gutter
+            if ((mii.fState & MFS_CHECKED) != 0) {
+                int cx = rc.left + 14;
+                int cy = (rc.top + rc.bottom) / 2;
+                COLORREF chkCol = disabled ? gColMutedText : RGB(0xFF, 0xFF, 0xFF);
+                if ((mii.fType & MFT_RADIOCHECK) != 0) {
+                    HBRUSH br = CreateSolidBrush(chkCol);
+                    HPEN pen = CreatePen(PS_SOLID, 1, chkCol);
+                    HGDIOBJ oB = SelectObject(hdc, br);
+                    HGDIOBJ oP = SelectObject(hdc, pen);
+                    Ellipse(hdc, cx - 3, cy - 3, cx + 3, cy + 3);
+                    SelectObject(hdc, oB);
+                    SelectObject(hdc, oP);
+                    DeleteObject(br);
+                    DeleteObject(pen);
+                } else {
+                    HPEN pen = CreatePen(PS_SOLID, 2, chkCol);
+                    HGDIOBJ oP = SelectObject(hdc, pen);
+                    MoveToEx(hdc, cx - 5, cy, nullptr);
+                    LineTo(hdc, cx - 2, cy + 3);
+                    LineTo(hdc, cx + 5, cy - 4);
+                    SelectObject(hdc, oP);
+                    DeleteObject(pen);
+                }
+            }
+
+            NONCLIENTMETRICSW ncm = {};
+            ncm.cbSize = sizeof(ncm);
+            HFONT hFont = SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)
+                              ? CreateFontIndirectW(&ncm.lfMenuFont) : nullptr;
+            HFONT oldFont = hFont ? static_cast<HFONT>(SelectObject(hdc, hFont)) : nullptr;
+            int oldBk = SetBkMode(hdc, TRANSPARENT);
+
+            wchar_t* tabPos = wcschr(menuText, L'\t');
+            if (tabPos) {
+                *tabPos = L'\0';
+                ++tabPos;
+            }
+
+            RECT rcLeft = { rc.left + 28, rc.top, rc.right - 22, rc.bottom };
+            COLORREF mainCol = disabled ? gColMutedText : ((selected || hot) ? RGB(0xFF, 0xFF, 0xFF) : gColText);
+            COLORREF oldTxt = SetTextColor(hdc, mainCol);
+            DWORD leftFlags = DT_LEFT | DT_VCENTER | DT_SINGLELINE | ((state & ODS_NOACCEL) ? DT_HIDEPREFIX : 0);
+            DrawTextW(hdc, menuText, -1, &rcLeft, leftFlags);
+
+            if (tabPos && *tabPos) {
+                RECT rcRight = { rc.left + 28, rc.top, rc.right - 22, rc.bottom };
+                SetTextColor(hdc, disabled ? gColMutedText : ((selected || hot) ? RGB(0xDC, 0xE6, 0xF2) : gColMutedText));
+                DrawTextW(hdc, tabPos, -1, &rcRight, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            }
+
+            SetTextColor(hdc, oldTxt);
+            SetBkMode(hdc, oldBk);
+            if (oldFont) SelectObject(hdc, oldFont);
+            if (hFont) DeleteObject(hFont);
+
+            // Submenu arrow (and clip exclusion so Windows doesn't paint a black arrow on top)
+            if (mii.hSubMenu != nullptr) {
+                int ax = rc.right - 12;
+                int ay = (rc.top + rc.bottom) / 2;
+                COLORREF arrCol = disabled ? gColMutedText : ((selected || hot) ? RGB(0xFF, 0xFF, 0xFF) : gColText);
+                POINT pts[3] = { { ax - 2, ay - 4 }, { ax + 2, ay }, { ax - 2, ay + 4 } };
+                HBRUSH br = CreateSolidBrush(arrCol);
+                HPEN pen = CreatePen(PS_SOLID, 1, arrCol);
+                HGDIOBJ oB = SelectObject(hdc, br);
+                HGDIOBJ oP = SelectObject(hdc, pen);
+                Polygon(hdc, pts, 3);
+                SelectObject(hdc, oB);
+                SelectObject(hdc, oP);
+                DeleteObject(br);
+                DeleteObject(pen);
+                ExcludeClipRect(hdc, rc.right - 20, rc.top, rc.right, rc.bottom);
+            }
+        }
+
+        *lr = 0;
+        return true;
+    }
+
+    return false;
 }
+
+// ============================================================================
+// Dark Classic Button / CheckBox / Radio / GroupBox & UpDown Spin Subclasses
+// ============================================================================
+static bool IsImageOrOwnerDrawButton(HWND hwnd, LONG_PTR style) {
+
+        return uahRes;
+    }
+
+    switch (msg) {
+        case WM_ERASEBKGND: {
+            if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) == 0) {
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                int saved = SaveDC(hdc);
+                for (HWND ch = GetWindow(hwnd, GW_CHILD); ch != nullptr; ch = GetWindow(ch, GW_HWNDNEXT)) {
+                    if (IsWindowVisible(ch)) {
+                        RECT rcCh = {};
+                        GetWindowRect(ch, &rcCh);
+                        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<LPPOINT>(&rcCh), 2);
+                        ExcludeClipRect(hdc, rcCh.left, rcCh.top, rcCh.right, rcCh.bottom);
+                    }
+                }
+                RECT rc = {};
+                GetClientRect(hwnd, &rc);
+                RawFillRect(hdc, &rc, gBrushBg);
+                RestoreDC(hdc, saved);
+                return 1;
+            }
+            break;
+        }
+
+        case WM_CTLCOLORDLG:
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdc, gColText);
+            SetBkColor(hdc, gColBg);
+            return reinterpret_cast<LRESULT>(gBrushBg);
+        }
+
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetTextColor(hdc, gColText);
+            SetBkColor(hdc, gColInput);
+            return reinterpret_cast<LRESULT>(gBrushInput);
+        }
+
+        case WM_NOTIFY: {
+            auto* nmh = reinterpret_cast<NMHDR*>(lParam);
+            if (nmh && nmh->code == NM_CUSTOMDRAW) {
+                wchar_t cls[64] = {};
+                GetClassNameW(nmh->hwndFrom, cls, 64);
+
+                if (_wcsicmp(cls, L"SysHeader32") == 0) {
+                    auto* cd = reinterpret_cast<NMCUSTOMDRAW*>(lParam);
+                    if (cd->dwDrawStage == CDDS_PREPAINT) {
+                        return CDRF_NOTIFYITEMDRAW;
+                    }
+                    if (cd->dwDrawStage == CDDS_ITEMPREPAINT) {
+                        bool hot = (cd->uItemState & CDIS_HOT) != 0;
+                        bool sel = (cd->uItemState & CDIS_SELECTED) != 0;
+                        RawFillRect(cd->hdc, &cd->rc, sel ? gBrushAccent : (hot ? gBrushHover : gBrushSurface));
+                        RECT rSep = { cd->rc.right - 1, cd->rc.top, cd->rc.right, cd->rc.bottom };
+                        RawFillRect(cd->hdc, &rSep, gBrushBorder);
+
+                        wchar_t text[256] = {};
+                        HDITEMW hdi = {};
+                        hdi.mask = HDI_TEXT;
+                        hdi.pszText = text;
+                        hdi.cchTextMax = 255;
+                        SendMessageW(nmh->hwndFrom, HDM_GETITEMW, cd->dwItemSpec, reinterpret_cast<LPARAM>(&hdi));
+
+                        RECT rcText = cd->rc;
+                        rcText.left += 6;
+                        rcText.right -= 4;
+                        SetBkMode(cd->hdc, TRANSPARENT);
+                        SetTextColor(cd->hdc, gColText);
+                        DrawTextW(cd->hdc, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                        return CDRF_SKIPDEFAULT;
+                    }
+                } else if (_wcsicmp(cls, L"ToolbarWindow32") == 0) {
+                    auto* tbcd = reinterpret_cast<NMTBCUSTOMDRAW*>(lParam);
+                    if (tbcd->nmcd.dwDrawStage == CDDS_PREERASE) {
+                        RawFillRect(tbcd->nmcd.hdc, &tbcd->nmcd.rc, gBrushBg);
+                        return CDRF_SKIPDEFAULT;
+                    }
+                    if (tbcd->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                        return CDRF_NOTIFYITEMDRAW;
+                    }
+                    if (tbcd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                        int btnIdx = static_cast<int>(SendMessageW(nmh->hwndFrom, TB_COMMANDTOINDEX, tbcd->nmcd.dwItemSpec, 0));
+                        TBBUTTON tbb = {};
+                        HIMAGELIST hImg = reinterpret_cast<HIMAGELIST>(SendMessageW(nmh->hwndFrom, TB_GETIMAGELIST, 0, 0));
+                        if (btnIdx >= 0 && hImg != nullptr &&
+                            SendMessageW(nmh->hwndFrom, TB_GETBUTTON, btnIdx, reinterpret_cast<LPARAM>(&tbb)) &&
+                            tbb.iBitmap >= 0 && (tbb.fsStyle & BTNS_SEP) == 0)
+                        {
+                            RECT rc = tbcd->nmcd.rc;
+                            RawFillRect(tbcd->nmcd.hdc, &rc, gBrushBg);
+
+                            bool enabled = (tbb.fsState & TBSTATE_ENABLED) != 0 && (tbcd->nmcd.uItemState & CDIS_DISABLED) == 0;
+                            bool checked = (tbb.fsState & (TBSTATE_CHECKED | TBSTATE_PRESSED)) != 0 ||
+                                           (tbcd->nmcd.uItemState & (CDIS_CHECKED | CDIS_SELECTED)) != 0;
+                            bool pressed = (tbb.fsState & TBSTATE_PRESSED) != 0;
+                            bool hot     = (tbcd->nmcd.uItemState & CDIS_HOT) != 0;
+
+                            COLORREF itemBg = gColBg;
+                            RECT rcBtn = { rc.left + 1, rc.top + 1, rc.right - 1, rc.bottom - 1 };
+                            if (enabled && checked) {
+                                itemBg = gColAccent;
+                                RawFillRect(tbcd->nmcd.hdc, &rcBtn, gBrushAccent);
+                                Draw1PxBorder(tbcd->nmcd.hdc, rcBtn, RGB(0x4C, 0x88, 0xC8));
+                            } else if (enabled && hot) {
+                                itemBg = gColHover;
+                                RawFillRect(tbcd->nmcd.hdc, &rcBtn, gBrushHover);
+                                Draw1PxBorder(tbcd->nmcd.hdc, rcBtn, RGB(0x4E, 0x4E, 0x58));
+                            }
+
+                            int cx = 16, cy = 16;
+                            ImageList_GetIconSize(hImg, &cx, &cy);
+                            int ix = rc.left + ((rc.right - rc.left) - cx) / 2 + (pressed ? 1 : 0);
+                            int iy = rc.top  + ((rc.bottom - rc.top) - cy) / 2 + (pressed ? 1 : 0);
+
+                            DrawToolbarIconSmart(tbcd->nmcd.hdc, ix, iy, hImg, tbb.iBitmap, enabled, itemBg);
+                            return CDRF_SKIPDEFAULT;
+                        }
+                        return TBCDRF_NOEDGES | TBCDRF_NOETCHEDEFFECT | TBCDRF_BLENDICON;
+                    }
+                } else if (_wcsicmp(cls, L"SysListView32") == 0) {
+                    LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
+                    auto* lvcd = reinterpret_cast<NMLVCUSTOMDRAW*>(lParam);
+                    if (lvcd->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                        return res | CDRF_NOTIFYITEMDRAW;
+                    }
+                    if (lvcd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                        int idx = static_cast<int>(lvcd->nmcd.dwItemSpec);
+                        bool isSel = (idx >= 0) && ((ListView_GetItemState(nmh->hwndFrom, idx, LVIS_SELECTED) & LVIS_SELECTED) != 0);
+                        if (!isSel) {
+                            lvcd->clrText = LiftColorForDarkBg(lvcd->clrText);
+                            lvcd->clrTextBk = gColSurface;
+                        } else {
+                            lvcd->clrText = RGB(0xFF, 0xFF, 0xFF);
+                            lvcd->clrTextBk = (GetFocus() == nmh->hwndFrom) ? gColAccent : gColHover;
+                        }
+                        return res | CDRF_NOTIFYSUBITEMDRAW;
+                    }
+                    if (lvcd->nmcd.dwDrawStage == (CDDS_ITEMPREPAINT | CDDS_SUBITEM)) {
+                        int idx = static_cast<int>(lvcd->nmcd.dwItemSpec);
+                        bool isSel = (idx >= 0) && ((ListView_GetItemState(nmh->hwndFrom, idx, LVIS_SELECTED) & LVIS_SELECTED) != 0);
+                        if (!isSel) {
+                            lvcd->clrText = LiftColorForDarkBg(lvcd->clrText);
+                            lvcd->clrTextBk = gColSurface;
+                        } else {
+                            lvcd->clrText = RGB(0xFF, 0xFF, 0xFF);
+                            lvcd->clrTextBk = (GetFocus() == nmh->hwndFrom) ? gColAccent : gColHover;
+                        }
+                        return res;
+                    }
+                    return res;
+                } else if (_wcsicmp(cls, L"SysTreeView32") == 0) {
+                    LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
+                    auto* tvcd = reinterpret_cast<NMTVCUSTOMDRAW*>(lParam);
+                    if (tvcd->nmcd.dwDrawStage == CDDS_PREPAINT) {
+                        return res | CDRF_NOTIFYITEMDRAW;
+                    }
+                    if (tvcd->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+                        HTREEITEM hItem = reinterpret_cast<HTREEITEM>(tvcd->nmcd.dwItemSpec);
+                        bool isSel = (hItem != nullptr) && ((TreeView_GetItemState(nmh->hwndFrom, hItem, TVIS_SELECTED) & TVIS_SELECTED) != 0);
+                        if (!isSel) {
+                            tvcd->clrText = LiftColorForDarkBg(tvcd->clrText);
+                            tvcd->clrTextBk = gColSurface;
+                        } else {
+                            tvcd->clrText = RGB(0xFF, 0xFF, 0xFF);
+                            tvcd->clrTextBk = (GetFocus() == nmh->hwndFrom) ? gColAccent : gColHover;
+                        }
+                        return res;
+                    }
+                    return res;
+                }
+            }
+            break;
+        }
+
+        case WM_NCPAINT:
+        case WM_NCACTIVATE: {
+            LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
+            if (GetMenu(hwnd) != nullptr) {
+                DrawMenuBarBottomHairline(hwnd);
+            }
+            return res;
+        }
+
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId);
+            break;
+    }
+
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
+
+static LRESULT CALLBACK DarkHeaderSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    if (msg == WM_ERASEBKGND) {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc = {};
+        GetClientRect(hwnd, &rc);
+        RawFillRect(hdc, &rc, gBrushSurface);
+        return 1;
+    }
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, DarkHeaderSubclassProc, kHeaderSubclassId);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK DarkTabSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    if (msg == WM_ERASEBKGND) {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        RECT rc = {};
+        GetClientRect(hwnd, &rc);
+        RawFillRect(hdc, &rc, gBrushBg);
+        return 1;
+    }
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static void StyleWindowDark(HWND hwnd);
+
+static BOOL CALLBACK EnumChildStyleProc(HWND child, LPARAM /*lParam*/) {
+    StyleWindowDark(child);
+    return TRUE;
+}
+
+static void StyleWindowDark(HWND hwnd) {
+    if (!hwnd || !IsWindow(hwnd) || gInStyleWindow)
+        return;
+
+    gInStyleWindow = true;
+
+    wchar_t cls[96] = {};
+    if (GetClassNameW(hwnd, cls, 96) > 0) {
+        if (wcsstr(cls, L"OpenGL") == nullptr) {
+            LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            bool isChild = (style & WS_CHILD) != 0;
+
+            if (!isChild) {
+                EnableDarkTitleBar(hwnd);
+                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+            } else {
+                // Ensure the parent container handles WM_CTLCOLOR* & NM_CUSTOMDRAW (even if parent class is 'Warcraft III'!)
+                HWND hParent = GetParent(hwnd);
+                if (hParent && IsWindow(hParent)) {
+                    wchar_t pCls[96] = {};
+                    GetClassNameW(hParent, pCls, 96);
+                    if (wcsstr(pCls, L"OpenGL") == nullptr) {
+                        SetWindowSubclass(hParent, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                    }
+                }
+            }
+
+            if (_wcsicmp(cls, L"SysTreeView32") == 0) {
+                SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+                TreeView_SetBkColor(hwnd, gColSurface);
+                TreeView_SetTextColor(hwnd, gColText);
+                TreeView_SetLineColor(hwnd, gColBorder);
+            } else if (_wcsicmp(cls, L"SysListView32") == 0) {
+                SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+                ListView_SetBkColor(hwnd, gColSurface);
+                ListView_SetTextBkColor(hwnd, gColSurface);
+                ListView_SetTextColor(hwnd, gColText);
+                HWND hHdr = ListView_GetHeader(hwnd);
+                if (hHdr) {
+                    SetWindowTheme(hHdr, L"", L"");
+                    SetWindowSubclass(hHdr, DarkHeaderSubclassProc, kHeaderSubclassId, 0);
+                }
+                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+            } else if (_wcsicmp(cls, L"SysHeader32") == 0) {
+                SetWindowTheme(hwnd, L"", L"");
+                SetWindowSubclass(hwnd, DarkHeaderSubclassProc, kHeaderSubclassId, 0);
+            } else if (_wcsicmp(cls, L"ComboBox") == 0 || _wcsicmp(cls, L"ComboBoxEx32") == 0) {
+                SetWindowTheme(hwnd, L"DarkMode_CFD", nullptr);
+                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+            } else if (_wcsicmp(cls, L"Button") == 0) {
+                SetWindowTheme(hwnd, L"", L"");
+                SetWindowSubclass(hwnd, DarkButtonSubclassProc, kButtonSubclassId, 0);
+            } else if (_wcsicmp(cls, L"msctls_updown32") == 0) {
+                SetWindowTheme(hwnd, L"", L"");
+                SetWindowSubclass(hwnd, DarkUpDownSubclassProc, kUpDownSubclassId, 0);
+            } else if (_wcsicmp(cls, L"Edit") == 0 || _wcsicmp(cls, L"ListBox") == 0 ||
+                       _wcsicmp(cls, L"ComboLBox") == 0 || _wcsicmp(cls, L"ScrollBar") == 0) {
+                SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+            } else if (_wcsnicmp(cls, L"RichEdit", 8) == 0 || _wcsnicmp(cls, L"RICHEDIT", 8) == 0) {
+                SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+                SendMessageW(hwnd, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(gColInput));
+                CHARFORMAT2W cf = {};
+                cf.cbSize = sizeof(cf);
+                cf.dwMask = CFM_COLOR;
+                cf.crTextColor = gColText;
+                SendMessageW(hwnd, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
+            } else if (_wcsicmp(cls, L"SysTabControl32") == 0) {
+                SetWindowTheme(hwnd, L"", L"");
+                SetWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId, 0);
+                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+            } else if (_wcsicmp(cls, L"ToolbarWindow32") == 0 || _wcsicmp(cls, L"ReBarWindow32") == 0 ||
+                       _wcsicmp(cls, L"msctls_statusbar32") == 0 || _wcsicmp(cls, L"msctls_trackbar32") == 0) {
+                SetWindowTheme(hwnd, L"", L"");
+                if (_wcsicmp(cls, L"msctls_statusbar32") == 0) {
+                    SendMessageW(hwnd, SB_SETBKCOLOR, 0, static_cast<LPARAM>(gColSurface));
+                }
+                SetWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId, 0);
+                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+            } else if (_wcsicmp(cls, L"#32770") == 0 ||
+                       wcsstr(cls, L"Afx") != nullptr || wcsstr(cls, L"WorldEdit") != nullptr ||
+                       wcsstr(cls, L"MDIClient") != nullptr || wcsstr(cls, L"WE") != nullptr) {
+                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+            }
+        }
+    }
+
+    gInStyleWindow = false;
+}
+
+static LRESULT CALLBACK CbtHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HCBT_CREATEWND) {
+        StyleWindowDark(reinterpret_cast<HWND>(wParam));
+    } else if (nCode == HCBT_ACTIVATE) {
+        HWND hwnd = reinterpret_cast<HWND>(wParam);
+        StyleWindowDark(hwnd);
+        EnumChildWindows(hwnd, EnumChildStyleProc, 0);
+    }
+    return CallNextHookEx(tCbtHook, nCode, wParam, lParam);
+}
+
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

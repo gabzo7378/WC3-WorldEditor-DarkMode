@@ -1003,4 +1003,184 @@ static LRESULT CALLBACK CbtHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(tCbtHook, nCode, wParam, lParam);
 }
 
+static void EnsureLiveCbtHookOnUiThread() {
+    if (!tCbtHook) {
+        tCbtHook = SetWindowsHookExW(WH_CBT, CbtHookProc, nullptr, GetCurrentThreadId());
+    }
+}
+
+// ============================================================================
+// Detour Implementations (Hot-Patched on user32.dll & uxtheme.dll)
+// ============================================================================
+static DWORD WINAPI DetourGetSysColor(int nIndex) {
+    if (!gInInternalDraw && nIndex >= 0 && nIndex < 32 && gSysColorOverride[nIndex]) {
+        return gSysColors[nIndex];
+    }
+    return reinterpret_cast<fnGetSysColor>(gHpGetSysColor.origEntry)(nIndex);
+}
+
+static HBRUSH WINAPI DetourGetSysColorBrush(int nIndex) {
+    if (!gInInternalDraw && nIndex >= 0 && nIndex < 32 && gSysColorOverride[nIndex] && gSysBrushes[nIndex]) {
+        return gSysBrushes[nIndex];
+    }
+    return reinterpret_cast<fnGetSysColorBrush>(gHpGetSysColorBrush.origEntry)(nIndex);
+}
+
+static int WINAPI DetourFillRect(HDC hDC, const RECT* lprc, HBRUSH hbr) {
+    if (!gInInternalDraw) {
+        uintptr_t v = reinterpret_cast<uintptr_t>(hbr);
+        if (v >= 1 && v <= 32) {
+            int idx = static_cast<int>(v - 1);
+            if (gSysColorOverride[idx] && gSysBrushes[idx]) {
+                hbr = gSysBrushes[idx];
+            }
+        }
+    }
+    return reinterpret_cast<fnFillRect>(gHpFillRect.origEntry)(hDC, lprc, hbr);
+}
+
+static BOOL WINAPI DetourDrawEdge(HDC hdc, LPRECT qrc, UINT edge, UINT grfFlags) {
+    if (!qrc || !hdc) {
+        return reinterpret_cast<fnDrawEdge>(gHpDrawEdge.origEntry)(hdc, qrc, edge, grfFlags);
+    }
+
+    RECT rc = *qrc;
+    if ((grfFlags & BF_MONO) == 0 && (grfFlags & BF_FLAT) == 0) {
+        if (grfFlags & BF_MIDDLE) {
+            RawFillRect(hdc, &rc, gBrushBg);
+        }
+
+        // Draw sleek 1px dark border on requested edges instead of white Win95 3D bevels
+        if (grfFlags & BF_TOP) {
+            RECT r = { rc.left, rc.top, rc.right, rc.top + 1 };
+            RawFillRect(hdc, &r, gBrushBorder);
+        }
+        if (grfFlags & BF_BOTTOM) {
+            RECT r = { rc.left, rc.bottom - 1, rc.right, rc.bottom };
+            RawFillRect(hdc, &r, gBrushBorder);
+        }
+        if (grfFlags & BF_LEFT) {
+            RECT r = { rc.left, rc.top, rc.left + 1, rc.bottom };
+            RawFillRect(hdc, &r, gBrushBorder);
+        }
+        if (grfFlags & BF_RIGHT) {
+            RECT r = { rc.right - 1, rc.top, rc.right, rc.bottom };
+            RawFillRect(hdc, &r, gBrushBorder);
+        }
+
+        if (grfFlags & BF_ADJUST) {
+            int thickness = ((edge & BDR_OUTER) && (edge & BDR_INNER)) ? 2 : 1;
+            if (grfFlags & BF_LEFT)   qrc->left   += thickness;
+            if (grfFlags & BF_TOP)    qrc->top    += thickness;
+            if (grfFlags & BF_RIGHT)  qrc->right  -= thickness;
+            if (grfFlags & BF_BOTTOM) qrc->bottom -= thickness;
+        }
+        return TRUE;
+    }
+
+    return reinterpret_cast<fnDrawEdge>(gHpDrawEdge.origEntry)(hdc, qrc, edge, grfFlags);
+}
+
+static COLORREF WINAPI DetourGetThemeSysColor(HTHEME hTheme, int iColorId) {
+    if (iColorId >= 0 && iColorId < 32 && gSysColorOverride[iColorId]) {
+        return gSysColors[iColorId];
+    }
+    return reinterpret_cast<fnGetThemeSysColor>(gHpGetThemeSysColor.origEntry)(hTheme, iColorId);
+}
+
+static HBRUSH WINAPI DetourGetThemeSysColorBrush(HTHEME hTheme, int iColorId) {
+    if (iColorId >= 0 && iColorId < 32 && gSysColorOverride[iColorId] && gSysBrushes[iColorId]) {
+        return gSysBrushes[iColorId];
+    }
+    return reinterpret_cast<fnGetThemeSysColorBrush>(gHpGetThemeSysColorBrush.origEntry)(hTheme, iColorId);
+}
+
+static LPCWSTR MapClassListToDark(HWND /*hwnd*/, LPCWSTR pszClassList, bool& forceClassicNull) {
+    forceClassicNull = false;
+    if (!pszClassList || !*pszClassList) return pszClassList;
+
+    if (wcsstr(pszClassList, L"DarkMode_") != nullptr)
+        return pszClassList;
+
+    if (_wcsicmp(pszClassList, L"ScrollBar") == 0)
+        return L"DarkMode_Explorer::ScrollBar";
+    if (_wcsicmp(pszClassList, L"Combobox") == 0 || _wcsicmp(pszClassList, L"ComboBox") == 0)
+        return L"DarkMode_CFD::Combobox";
+    if (_wcsicmp(pszClassList, L"Edit") == 0)
+        return L"DarkMode_Explorer::Edit";
+    if (_wcsicmp(pszClassList, L"TreeView") == 0 || _wcsicmp(pszClassList, L"Explorer::TreeView") == 0)
+        return L"DarkMode_Explorer::TreeView";
+    if (_wcsicmp(pszClassList, L"ListView") == 0 || _wcsicmp(pszClassList, L"Explorer::ListView") == 0)
+        return L"DarkMode_Explorer::ListView";
+    if (_wcsicmp(pszClassList, L"Menu") == 0)
+        return pszClassList;
+
+    if (_wcsicmp(pszClassList, L"Button") == 0 ||
+        _wcsicmp(pszClassList, L"Tab") == 0 ||
+        _wcsicmp(pszClassList, L"Toolbar") == 0 ||
+        _wcsicmp(pszClassList, L"Rebar") == 0 ||
+        _wcsicmp(pszClassList, L"Status") == 0 ||
+        _wcsicmp(pszClassList, L"Header") == 0 ||
+        _wcsicmp(pszClassList, L"Trackbar") == 0 ||
+        _wcsicmp(pszClassList, L"Spin") == 0 ||
+        _wcsicmp(pszClassList, L"Progress") == 0 ||
+        _wcsicmp(pszClassList, L"Tooltip") == 0)
+    {
+        forceClassicNull = true;
+        return nullptr;
+    }
+
+    return pszClassList;
+}
+
+static HTHEME WINAPI DetourOpenThemeData(HWND hwnd, LPCWSTR pszClassList) {
+    auto orig = reinterpret_cast<fnOpenThemeData>(gHpOpenThemeData.origEntry);
+    if (gInThemeRedirect) return orig(hwnd, pszClassList);
+
+    gInThemeRedirect = true;
+    bool forceNull = false;
+    LPCWSTR mapped = MapClassListToDark(hwnd, pszClassList, forceNull);
+    HTHEME res = forceNull ? nullptr : orig(hwnd, mapped);
+    if (!forceNull && !res && mapped != pszClassList) {
+        res = orig(hwnd, pszClassList);
+    }
+    gInThemeRedirect = false;
+    return res;
+}
+
+static HTHEME WINAPI DetourOpenThemeDataEx(HWND hwnd, LPCWSTR pszClassList, DWORD dwFlags) {
+    auto orig = reinterpret_cast<fnOpenThemeDataEx>(gHpOpenThemeDataEx.origEntry);
+    if (gInThemeRedirect) return orig(hwnd, pszClassList, dwFlags);
+
+    gInThemeRedirect = true;
+    bool forceNull = false;
+    LPCWSTR mapped = MapClassListToDark(hwnd, pszClassList, forceNull);
+    HTHEME res = forceNull ? nullptr : orig(hwnd, mapped, dwFlags);
+    if (!forceNull && !res && mapped != pszClassList) {
+        res = orig(hwnd, pszClassList, dwFlags);
+    }
+    gInThemeRedirect = false;
+    return res;
+}
+
+static HWND WINAPI DetourCreateWindowExA(
+    DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
+    int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
+{
+    EnsureLiveCbtHookOnUiThread();
+    HWND hwnd = reinterpret_cast<fnCreateWindowExA>(gHpCreateWindowExA.origEntry)(
+        dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam);
+    if (hwnd) {
+        StyleWindowDark(hwnd);
+    }
+    return hwnd;
+}
+
+static HWND WINAPI DetourCreateWindowExW(
+    DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindowName, DWORD dwStyle,
+    int X, int Y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu, HINSTANCE hInstance, LPVOID lpParam)
+{
+    EnsureLiveCbtHookOnUiThread();
+    HWND hwnd = reinterpret_cast<fnCreateWindowExW>(gHpCreateWindowExW.origEntry)(
+
 BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }

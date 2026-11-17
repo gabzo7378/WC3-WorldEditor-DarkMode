@@ -1182,5 +1182,95 @@ static HWND WINAPI DetourCreateWindowExW(
 {
     EnsureLiveCbtHookOnUiThread();
     HWND hwnd = reinterpret_cast<fnCreateWindowExW>(gHpCreateWindowExW.origEntry)(
+        dwExStyle, lpClassName, lpWindowName, dwStyle, X, Y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam);
+    if (hwnd) {
+        StyleWindowDark(hwnd);
+    }
+    return hwnd;
+}
 
-BOOL APIENTRY DllMain(HMODULE, DWORD, LPVOID) { return TRUE; }
+static HWND WINAPI DetourCreateDialogIndirectParamA(
+    HINSTANCE hInstance, LPCDLGTEMPLATEA lpTemplate, HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam)
+{
+    EnsureLiveCbtHookOnUiThread();
+    HWND hwnd = reinterpret_cast<fnCreateDialogIndirectParamA>(gHpCreateDialogIndirectParamA.origEntry)(
+        hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+    if (hwnd) {
+        StyleWindowDark(hwnd);
+        EnumChildWindows(hwnd, EnumChildStyleProc, 0);
+    }
+    return hwnd;
+}
+
+static HWND WINAPI DetourCreateDialogIndirectParamW(
+    HINSTANCE hInstance, LPCDLGTEMPLATEW lpTemplate, HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam)
+{
+    EnsureLiveCbtHookOnUiThread();
+    HWND hwnd = reinterpret_cast<fnCreateDialogIndirectParamW>(gHpCreateDialogIndirectParamW.origEntry)(
+        hInstance, lpTemplate, hWndParent, lpDialogFunc, dwInitParam);
+    if (hwnd) {
+        StyleWindowDark(hwnd);
+        EnumChildWindows(hwnd, EnumChildStyleProc, 0);
+    }
+    return hwnd;
+}
+
+// ============================================================================
+// Initialization & DLL Entry
+// ============================================================================
+static void InitUxThemeAndDwm() {
+    HMODULE hUx = LoadLibraryW(L"uxtheme.dll");
+    if (hUx) {
+        gAllowDarkModeForWindow = reinterpret_cast<fnAllowDarkModeForWindow>(GetProcAddress(hUx, MAKEINTRESOURCEA(133)));
+        gSetPreferredAppMode    = reinterpret_cast<fnSetPreferredAppMode>(GetProcAddress(hUx, MAKEINTRESOURCEA(135)));
+        gFlushMenuThemes        = reinterpret_cast<fnFlushMenuThemes>(GetProcAddress(hUx, MAKEINTRESOURCEA(136)));
+        gRefreshImmersivePolicy = reinterpret_cast<fnRefreshImmersivePolicy>(GetProcAddress(hUx, MAKEINTRESOURCEA(104)));
+
+        if (gSetPreferredAppMode)    gSetPreferredAppMode(AppMode_ForceDark);
+        if (gRefreshImmersivePolicy) gRefreshImmersivePolicy();
+        if (gFlushMenuThemes)        gFlushMenuThemes();
+
+        InstallHotPatch(hUx, "OpenThemeData",         reinterpret_cast<void*>(&DetourOpenThemeData),         gHpOpenThemeData);
+        InstallHotPatch(hUx, "OpenThemeDataEx",       reinterpret_cast<void*>(&DetourOpenThemeDataEx),       gHpOpenThemeDataEx);
+        InstallHotPatch(hUx, "GetThemeSysColor",      reinterpret_cast<void*>(&DetourGetThemeSysColor),      gHpGetThemeSysColor);
+        InstallHotPatch(hUx, "GetThemeSysColorBrush", reinterpret_cast<void*>(&DetourGetThemeSysColorBrush), gHpGetThemeSysColorBrush);
+    }
+
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (hDwm) {
+        gDwmSetWindowAttribute = reinterpret_cast<fnDwmSetWindowAttribute>(GetProcAddress(hDwm, "DwmSetWindowAttribute"));
+    }
+
+    HMODULE hUser = LoadLibraryW(L"user32.dll");
+    if (hUser) {
+        InstallHotPatch(hUser, "GetSysColor",                reinterpret_cast<void*>(&DetourGetSysColor),                gHpGetSysColor);
+        InstallHotPatch(hUser, "GetSysColorBrush",           reinterpret_cast<void*>(&DetourGetSysColorBrush),           gHpGetSysColorBrush);
+        InstallHotPatch(hUser, "FillRect",                   reinterpret_cast<void*>(&DetourFillRect),                   gHpFillRect);
+        InstallHotPatch(hUser, "DrawEdge",                   reinterpret_cast<void*>(&DetourDrawEdge),                   gHpDrawEdge);
+        InstallHotPatch(hUser, "CreateWindowExA",            reinterpret_cast<void*>(&DetourCreateWindowExA),            gHpCreateWindowExA);
+        InstallHotPatch(hUser, "CreateWindowExW",            reinterpret_cast<void*>(&DetourCreateWindowExW),            gHpCreateWindowExW);
+        InstallHotPatch(hUser, "CreateDialogIndirectParamA", reinterpret_cast<void*>(&DetourCreateDialogIndirectParamA), gHpCreateDialogIndirectParamA);
+        InstallHotPatch(hUser, "CreateDialogIndirectParamW", reinterpret_cast<void*>(&DetourCreateDialogIndirectParamW), gHpCreateDialogIndirectParamW);
+    }
+}
+
+extern "C" __declspec(dllexport) DWORD WINAPI InitializeDarkMode(LPVOID /*lpThreadId*/) {
+    if (InterlockedExchange(&gInitialized, 1) != 0)
+        return 1;
+
+    LoadPaletteAndBrushes();
+    InitUxThemeAndDwm();
+    return 1;
+}
+
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpReserved*/) {
+    if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        gSelfModule = hModule;
+    } else if (ul_reason_for_call == DLL_THREAD_DETACH || ul_reason_for_call == DLL_PROCESS_DETACH) {
+        if (tCbtHook) {
+            UnhookWindowsHookEx(tCbtHook);
+            tCbtHook = nullptr;
+        }
+    }
+    return TRUE;
+}

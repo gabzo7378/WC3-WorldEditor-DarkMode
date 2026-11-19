@@ -1,4 +1,16 @@
-# Build outputs
+# Compilados temporales en la raíz (la versión lista para usar vive en su carpeta dedicada)
+/WE_DarkMode.dll
+/WorldEditor_Dark.exe
+/Para_Copiar_A_WC3/
+
+# Objetos y temporales
 *.o
 *.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.log
 *.tmp
+.DS_Store
+Thumbs.db

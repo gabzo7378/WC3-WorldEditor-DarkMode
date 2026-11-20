@@ -61,11 +61,31 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     std::wstring baseDir(selfPath);
 
+    // 1. Prefer clean subfolder .\WE_DarkMode\ (for neat WC3 root folder), fallback to same folder
+    std::wstring subDir  = baseDir + L"\\WE_DarkMode";
+    std::wstring dllPath = subDir + L"\\WE_DarkMode.dll";
+    std::wstring iniPath = subDir + L"\\WE_DarkMode.ini";
+
+    if (!FileExistsW(dllPath)) {
+        dllPath = baseDir + L"\\WE_DarkMode.dll";
+        iniPath = baseDir + L"\\WE_DarkMode.ini";
+    }
+
+    if (!FileExistsW(dllPath)) {
+        MessageBoxW(
+            nullptr,
+            L"No se encontró WE_DarkMode.dll.\nColoca la carpeta 'WE_DarkMode' junto a WorldEditor_Dark.exe.",
+            L"World Editor Dark Mode",
+            MB_OK | MB_ICONERROR);
+        return 1;
+    }
+
+    // 2. Read optional overrides from INI (WorldEditPath can be blank for automatic portable detection!)
     wchar_t exeBuf[MAX_PATH] = {};
     wchar_t argsBuf[1024] = {};
-    if (FileExistsW(baseDir + L"\\WE_DarkMode.ini")) {
-        GetPrivateProfileStringW(L"General", L"WorldEditPath", L"", exeBuf, MAX_PATH, baseDir + L"\\WE_DarkMode.ini".c_str());
-        GetPrivateProfileStringW(L"General", L"Arguments", L"", argsBuf, 1024, baseDir + L"\\WE_DarkMode.ini".c_str());
+    if (FileExistsW(iniPath)) {
+        GetPrivateProfileStringW(L"General", L"WorldEditPath", L"", exeBuf, MAX_PATH, iniPath.c_str());
+        GetPrivateProfileStringW(L"General", L"Arguments", L"", argsBuf, 1024, iniPath.c_str());
     }
 
     std::wstring targetExe = exeBuf;
@@ -98,7 +118,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             if (!BrowseForWorldEditExe(targetExe)) {
                 return 0;
             }
-            WritePrivateProfileStringW(L"General", L"WorldEditPath", targetExe.c_str(), baseDir + L"\\WE_DarkMode.ini".c_str());
+            WritePrivateProfileStringW(L"General", L"WorldEditPath", targetExe.c_str(), iniPath.c_str());
         }
     }
 
@@ -134,16 +154,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
 
     bool ok = false;
-    SIZE_T byteLen = (baseDir + L"\\WE_DarkMode.dll".size() + 1) * sizeof(wchar_t);
+    SIZE_T byteLen = (dllPath.size() + 1) * sizeof(wchar_t);
     LPVOID remotePath = VirtualAllocEx(pi.hProcess, nullptr, byteLen, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (remotePath) {
-        if (WriteProcessMemory(pi.hProcess, remotePath, baseDir + L"\\WE_DarkMode.dll".c_str(), byteLen, nullptr)) {
+        if (WriteProcessMemory(pi.hProcess, remotePath, dllPath.c_str(), byteLen, nullptr)) {
             HMODULE hKernel = GetModuleHandleW(L"kernel32.dll");
             auto pLoadLibW = reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(hKernel, "LoadLibraryW"));
 
             DWORD remoteDllBase = 0;
             if (pLoadLibW && RunRemoteProc(pi.hProcess, pLoadLibW, remotePath, &remoteDllBase) && remoteDllBase != 0) {
-                HMODULE hLocal = LoadLibraryExW(baseDir + L"\\WE_DarkMode.dll".c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
+                HMODULE hLocal = LoadLibraryExW(dllPath.c_str(), nullptr, DONT_RESOLVE_DLL_REFERENCES);
                 if (hLocal) {
                     auto pLocalInit = reinterpret_cast<uintptr_t>(GetProcAddress(hLocal, "InitializeDarkMode"));
                     if (pLocalInit) {

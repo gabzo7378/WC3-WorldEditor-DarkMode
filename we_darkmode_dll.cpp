@@ -778,11 +778,142 @@ static LRESULT CALLBACK DarkButtonSubclassProc(
                 }
             } else if (btnType == BS_CHECKBOX || btnType == BS_AUTOCHECKBOX ||
                        btnType == BS_3STATE   || btnType == BS_AUTO3STATE) {
+                RawFillRect(hdc, &rc, gBrushBg);
+                int boxSz = 13;
+                int bx = rc.left + 2;
+                int by = rc.top + ((rc.bottom - rc.top) - boxSz) / 2;
+                RECT rcBox = { bx, by, bx + boxSz, by + boxSz };
 
-            EndPaint(hwnd, &ps); return 0; }
+                if ((checked || indet) && !disabled) {
+                    RawFillRect(hdc, &rcBox, gBrushAccent);
+                    Draw1PxBorder(hdc, rcBox, RGB(0x4C, 0x88, 0xC8));
+                } else {
+                    RawFillRect(hdc, &rcBox, gBrushInput);
+                    Draw1PxBorder(hdc, rcBox, hovered ? RGB(0x78, 0x78, 0x82) : RGB(0x52, 0x52, 0x5A));
+                }
+
+                if (checked) {
+                    HPEN pen = CreatePen(PS_SOLID, 2, disabled ? gColMutedText : RGB(0xFF, 0xFF, 0xFF));
+                    HGDIOBJ oP = SelectObject(hdc, pen);
+                    MoveToEx(hdc, bx + 3, by + 6, nullptr);
+                    LineTo(hdc, bx + 5, by + 9);
+                    LineTo(hdc, bx + 10, by + 3);
+                    SelectObject(hdc, oP);
+                    DeleteObject(pen);
+                } else if (indet) {
+                    RECT rcMid = { bx + 3, by + 3, bx + boxSz - 3, by + boxSz - 3 };
+                    RawFillRect(hdc, &rcMid, disabled ? gBrushBorder : static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+                }
+
+                RECT rcTxt = { bx + boxSz + 5, rc.top, rc.right, rc.bottom };
+                SetTextColor(hdc, disabled ? gColMutedText : gColText);
+                DWORD dt = DT_LEFT | DT_VCENTER | ((style & BS_MULTILINE) ? DT_WORDBREAK : DT_SINGLELINE);
+                DrawTextW(hdc, text, -1, &rcTxt, dt);
+            } else if (btnType == BS_RADIOBUTTON || btnType == BS_AUTORADIOBUTTON) {
+                RawFillRect(hdc, &rc, gBrushBg);
+                int boxSz = 13;
+                int bx = rc.left + 2;
+                int by = rc.top + ((rc.bottom - rc.top) - boxSz) / 2;
+
+                HPEN pen = CreatePen(PS_SOLID, 1, hovered ? RGB(0x78, 0x78, 0x82) : RGB(0x56, 0x56, 0x60));
+                HGDIOBJ oP = SelectObject(hdc, pen);
+                HGDIOBJ oB = SelectObject(hdc, gBrushInput);
+                Ellipse(hdc, bx, by, bx + boxSz, by + boxSz);
+
+                if (checked) {
+                    HBRUSH dotBr = CreateSolidBrush(disabled ? gColMutedText : RGB(0x58, 0xA6, 0xFF));
+                    HPEN dotPen  = CreatePen(PS_SOLID, 1, disabled ? gColMutedText : RGB(0x58, 0xA6, 0xFF));
+                    SelectObject(hdc, dotBr);
+                    SelectObject(hdc, dotPen);
+                    Ellipse(hdc, bx + 3, by + 3, bx + boxSz - 3, by + boxSz - 3);
+                    SelectObject(hdc, oB);
+                    SelectObject(hdc, oP);
+                    DeleteObject(dotBr);
+                    DeleteObject(dotPen);
+                } else {
+                    SelectObject(hdc, oB);
+                    SelectObject(hdc, oP);
+                }
+                DeleteObject(pen);
+
+                RECT rcTxt = { bx + boxSz + 5, rc.top, rc.right, rc.bottom };
+                SetTextColor(hdc, disabled ? gColMutedText : gColText);
+                DrawTextW(hdc, text, -1, &rcTxt, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            } else {
+                // PushButton / DefPushButton / PushLike
+                COLORREF faceCol = gColButton;
+                COLORREF brdCol  = (btnType == BS_DEFPUSHBUTTON || focused) ? RGB(0x3A, 0x72, 0xA8) : gColBorder;
+                COLORREF txtCol  = gColText;
+
+                if (disabled) {
+                    faceCol = RGB(0x20, 0x20, 0x22);
+                    brdCol  = RGB(0x30, 0x30, 0x34);
+                    txtCol  = gColMutedText;
+                } else if (pushed || checked) {
+                    faceCol = gColAccent;
+                    brdCol  = RGB(0x4C, 0x88, 0xC8);
+                    txtCol  = RGB(0xFF, 0xFF, 0xFF);
+                } else if (hovered) {
+                    faceCol = gColHover;
+                    brdCol  = RGB(0x56, 0x56, 0x62);
+                }
+
+                HBRUSH faceBr = CreateSolidBrush(faceCol);
+                RawFillRect(hdc, &rc, faceBr);
+                DeleteObject(faceBr);
+                Draw1PxBorder(hdc, rc, brdCol);
+
+                RECT rcTxt = rc;
+                if (pushed) OffsetRect(&rcTxt, 1, 1);
+                SetTextColor(hdc, txtCol);
+                DWORD dt = DT_CENTER | DT_VCENTER | ((style & BS_MULTILINE) ? DT_WORDBREAK : DT_SINGLELINE);
+                DrawTextW(hdc, text, -1, &rcTxt, dt);
+            }
+
+            SetBkMode(hdc, oldBk);
+            SelectObject(hdc, oldFont);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        case WM_NCDESTROY:
+            if (gHoveredCtrl == hwnd) gHoveredCtrl = nullptr;
+            RemoveWindowSubclass(hwnd, DarkButtonSubclassProc, kButtonSubclassId);
+            break;
     }
+
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
+
+static LRESULT CALLBACK DarkUpDownSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    if (msg == WM_ERASEBKGND) return 1;
+
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps = {};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc = {};
+        GetClientRect(hwnd, &rc);
+
+        bool horiz    = (GetWindowLongPtrW(hwnd, GWL_STYLE) & UDS_HORZ) != 0;
+        bool disabled = !IsWindowEnabled(hwnd);
+
+        RawFillRect(hdc, &rc, gBrushButton);
+        Draw1PxBorder(hdc, rc, gColBorder);
+
+        COLORREF arrCol = disabled ? gColMutedText : gColText;
+        HBRUSH br = CreateSolidBrush(arrCol);
+        HPEN pen  = CreatePen(PS_SOLID, 1, arrCol);
+        HGDIOBJ oB = SelectObject(hdc, br);
+        HGDIOBJ oP = SelectObject(hdc, pen);
+
+        if (horiz) {
+            int midX = (rc.left + rc.right) / 2;
+            int cy   = (rc.top + rc.bottom) / 2;
+            RECT sep = { midX, rc.top, midX + 1, rc.bottom };
+
         return uahRes;
     }
 

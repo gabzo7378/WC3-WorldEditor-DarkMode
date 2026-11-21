@@ -666,7 +666,123 @@ static bool HandleUahMenuMessage(HWND hwnd, UINT msg, WPARAM /*wParam*/, LPARAM 
 // Dark Classic Button / CheckBox / Radio / GroupBox & UpDown Spin Subclasses
 // ============================================================================
 static bool IsImageOrOwnerDrawButton(HWND hwnd, LONG_PTR style) {
+    LONG_PTR btnType = style & BS_TYPEMASK;
+    if (btnType == BS_OWNERDRAW) return true;
+    if ((style & (BS_BITMAP | BS_ICON)) != 0) return true;
+    if (DefSubclassProc(hwnd, BM_GETIMAGE, IMAGE_BITMAP, 0) != 0) return true;
+    if (DefSubclassProc(hwnd, BM_GETIMAGE, IMAGE_ICON, 0) != 0) return true;
+    return false;
+}
 
+static LRESULT CALLBACK DarkButtonSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    if (msg == WM_NCDESTROY) {
+        if (gHoveredCtrl == hwnd) gHoveredCtrl = nullptr;
+        RemoveWindowSubclass(hwnd, DarkButtonSubclassProc, kButtonSubclassId);
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
+    // Fast path for non-visual messages to avoid any re-entrancy during creation or queries
+    if (msg != WM_PAINT && msg != WM_ERASEBKGND && msg != WM_MOUSEMOVE && msg != WM_MOUSELEAVE &&
+        msg != BM_SETSTATE && msg != BM_SETCHECK && msg != WM_ENABLE &&
+        msg != WM_SETFOCUS && msg != WM_KILLFOCUS && msg != WM_SETTEXT)
+    {
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if (IsImageOrOwnerDrawButton(hwnd, style)) {
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
+    LONG_PTR btnType = style & BS_TYPEMASK;
+
+    switch (msg) {
+        case WM_MOUSEMOVE: {
+            if (gHoveredCtrl != hwnd) {
+                HWND prev = gHoveredCtrl;
+                gHoveredCtrl = hwnd;
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                if (prev && IsWindow(prev)) InvalidateRect(prev, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            if (gHoveredCtrl == hwnd) {
+                gHoveredCtrl = nullptr;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
+        case BM_SETSTATE:
+        case BM_SETCHECK:
+        case WM_ENABLE:
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_SETTEXT: {
+            LRESULT r = DefSubclassProc(hwnd, msg, wParam, lParam);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return r;
+        }
+        case WM_ERASEBKGND:
+            if (btnType != BS_GROUPBOX) return 1;
+            break;
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps = {};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc = {};
+            GetClientRect(hwnd, &rc);
+
+            bool disabled = !IsWindowEnabled(hwnd);
+            bool hovered  = (gHoveredCtrl == hwnd) && !disabled;
+            LRESULT bState = DefSubclassProc(hwnd, BM_GETSTATE, 0, 0);
+            bool pushed   = (bState & BST_PUSHED) != 0;
+            bool checked  = (bState & BST_CHECKED) != 0;
+            bool indet    = (bState & BST_INDETERMINATE) != 0;
+            bool focused  = (GetFocus() == hwnd);
+
+            wchar_t text[512] = {};
+            GetWindowTextW(hwnd, text, 511);
+
+            HFONT hFont = reinterpret_cast<HFONT>(DefSubclassProc(hwnd, WM_GETFONT, 0, 0));
+            if (!hFont) hFont = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+            HFONT oldFont = static_cast<HFONT>(SelectObject(hdc, hFont));
+            int oldBk = SetBkMode(hdc, TRANSPARENT);
+
+            if (btnType == BS_GROUPBOX) {
+                SIZE sz = {};
+                if (text[0]) GetTextExtentPoint32W(hdc, text, static_cast<int>(wcslen(text)), &sz);
+                int topY = (sz.cy > 0) ? (sz.cy / 2) : 6;
+                RECT rcBox = { rc.left, rc.top + topY, rc.right, rc.bottom };
+
+                int saved = SaveDC(hdc);
+                if (text[0]) {
+                    ExcludeClipRect(hdc, rc.left + 7, rc.top, rc.left + 13 + sz.cx, rc.top + sz.cy + 2);
+                }
+                Draw1PxBorder(hdc, rcBox, gColBorder);
+                RestoreDC(hdc, saved);
+
+                if (text[0]) {
+                    RECT rcCap = { rc.left + 9, rc.top, rc.left + 13 + sz.cx, rc.top + sz.cy + 2 };
+                    RawFillRect(hdc, &rcCap, gBrushBg);
+                    SetTextColor(hdc, disabled ? gColMutedText : gColText);
+                    DrawTextW(hdc, text, -1, &rcCap, DT_LEFT | DT_TOP | DT_SINGLELINE);
+                }
+            } else if (btnType == BS_CHECKBOX || btnType == BS_AUTOCHECKBOX ||
+                       btnType == BS_3STATE   || btnType == BS_AUTO3STATE) {
+
+            EndPaint(hwnd, &ps); return 0; }
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
         return uahRes;
     }
 

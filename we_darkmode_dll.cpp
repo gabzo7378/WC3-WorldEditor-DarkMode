@@ -428,7 +428,7 @@ static void DrawToolbarIconSmart(HDC hdcDest, int destX, int destY, HIMAGELIST h
             // Disabled toolbar icon: clear, recognizable muted silver + 30% original color tint
             // Lifts black/dark-gray strokes (Cut scissors, Undo/Redo arrows) so they never look like shadows!
             int luma = (srcR * 299 + srcG * 587 + srcB * 114) / 1000;
-            int lifted = 148 + (luma * 52) / 255; // 148..200 crisp visible silver range on #181818
+            int lifted = 120 + (luma * 50) / 255; // 148..200 crisp visible silver range on #181818
             outR = (lifted * 78 + srcR * 22) / 100;
             outG = (lifted * 78 + srcG * 22) / 100;
             outB = (lifted * 78 + srcB * 22) / 100;
@@ -913,7 +913,51 @@ static LRESULT CALLBACK DarkUpDownSubclassProc(
             int midX = (rc.left + rc.right) / 2;
             int cy   = (rc.top + rc.bottom) / 2;
             RECT sep = { midX, rc.top, midX + 1, rc.bottom };
+            RawFillRect(hdc, &sep, gBrushBorder);
 
+            int lx = (rc.left + midX) / 2;
+            int rx = (midX + rc.right) / 2;
+            POINT pL[3] = { { lx + 2, cy - 3 }, { lx - 2, cy }, { lx + 2, cy + 3 } };
+            POINT pR[3] = { { rx - 2, cy - 3 }, { rx + 2, cy }, { rx - 2, cy + 3 } };
+            Polygon(hdc, pL, 3);
+            Polygon(hdc, pR, 3);
+        } else {
+            int midY = (rc.top + rc.bottom) / 2;
+            int cx   = (rc.left + rc.right) / 2;
+            RECT sep = { rc.left, midY, rc.right, midY + 1 };
+            RawFillRect(hdc, &sep, gBrushBorder);
+
+            int ty = (rc.top + midY) / 2;
+            int by = (midY + rc.bottom) / 2;
+            POINT pU[3] = { { cx - 3, ty + 2 }, { cx, ty - 2 }, { cx + 3, ty + 2 } };
+            POINT pD[3] = { { cx - 3, by - 2 }, { cx, by + 2 }, { cx + 3, by - 2 } };
+            Polygon(hdc, pU, 3);
+            Polygon(hdc, pD, 3);
+        }
+
+        SelectObject(hdc, oB);
+        SelectObject(hdc, oP);
+        DeleteObject(br);
+        DeleteObject(pen);
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    if (msg == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, DarkUpDownSubclassProc, kUpDownSubclassId);
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+// ============================================================================
+// Container, Header & Tab Subclasses
+// ============================================================================
+static LRESULT CALLBACK DarkContainerSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    LRESULT uahRes = 0;
+    if (HandleUahMenuMessage(hwnd, msg, wParam, lParam, &uahRes)) {
         return uahRes;
     }
 
@@ -1104,6 +1148,7 @@ static LRESULT CALLBACK DarkUpDownSubclassProc(
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId);
             break;
+
     }
 
     return DefSubclassProc(hwnd, msg, wParam, lParam);

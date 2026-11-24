@@ -428,7 +428,7 @@ static void DrawToolbarIconSmart(HDC hdcDest, int destX, int destY, HIMAGELIST h
             // Disabled toolbar icon: clear, recognizable muted silver + 30% original color tint
             // Lifts black/dark-gray strokes (Cut scissors, Undo/Redo arrows) so they never look like shadows!
             int luma = (srcR * 299 + srcG * 587 + srcB * 114) / 1000;
-            int lifted = 120 + (luma * 50) / 255; // 148..200 crisp visible silver range on #181818
+            int lifted = 148 + (luma * 52) / 255; // 148..200 crisp visible silver range on #181818
             outR = (lifted * 78 + srcR * 22) / 100;
             outG = (lifted * 78 + srcG * 22) / 100;
             outB = (lifted * 78 + srcB * 22) / 100;
@@ -1148,7 +1148,6 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
         case WM_NCDESTROY:
             RemoveWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId);
             break;
-
     }
 
     return DefSubclassProc(hwnd, msg, wParam, lParam);

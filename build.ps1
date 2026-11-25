@@ -23,3 +23,12 @@ Write-Host "Compilando WorldEditor_Dark.exe (x86 32-bit)..."
     -luser32 -lcomdlg32 -lshell32 -lshlwapi
 
 if ($LASTEXITCODE -ne 0) { throw "Error compilando WorldEditor_Dark.exe" }
+
+$verDir = Join-Path $dir "WC3-Classic-1.21-1.27b"
+$verSub = Join-Path $verDir "WE_DarkMode"
+New-Item -ItemType Directory -Force -Path $verSub | Out-Null
+Copy-Item "$dir\WorldEditor_Dark.exe" (Join-Path $verDir "WorldEditor_Dark.exe") -Force
+Copy-Item "$dir\WE_DarkMode.dll"      (Join-Path $verSub "WE_DarkMode.dll")      -Force
+Copy-Item "$dir\WE_DarkMode.ini"      (Join-Path $verSub "WE_DarkMode.ini")      -Force
+
+Write-Host "Listo: WE_DarkMode.dll y WorldEditor_Dark.exe compilados y empaquetados en WC3-Classic-1.21-1.27b."

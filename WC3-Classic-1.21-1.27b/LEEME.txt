@@ -1,0 +1,22 @@
+====================================================================
+ WC3 World Editor Dark Mode — Edición Clásica (1.21 – 1.27b)
+====================================================================
+
+INSTALACIÓN PORTÁTIL (CUALQUIER PC):
+
+1. Copia estos dos elementos dentro de tu carpeta de Warcraft III:
+   - WorldEditor_Dark.exe
+   - WE_DarkMode\  (la carpeta completa con WE_DarkMode.dll y WE_DarkMode.ini)
+
+2. Así quedará tu carpeta de Warcraft III:
+   Warcraft III\
+     worldedit.exe          -> Editor clásico normal (sin tocar)
+     WorldEditor_Dark.exe   -> Editor clásico en Modo Oscuro
+     WE_DarkMode\
+       WE_DarkMode.dll
+       WE_DarkMode.ini
+
+3. Abre WorldEditor_Dark.exe para trabajar en Modo Oscuro, o worldedit.exe
+   cuando quieras abrir el editor normal.
+
+4. Para personalizar los colores, edita WE_DarkMode\WE_DarkMode.ini.

@@ -764,6 +764,12 @@ static LRESULT CALLBACK DarkButtonSubclassProc(
 
             wchar_t text[512] = {};
             GetWindowTextW(hwnd, text, 511);
+            if (text[0] == L'\0') {
+                auto baseProc = reinterpret_cast<WNDPROC>(GetClassLongPtrW(hwnd, GCLP_WNDPROC));
+                if (baseProc) {
+                    CallWindowProcW(baseProc, hwnd, WM_GETTEXT, 511, reinterpret_cast<LPARAM>(text));
+                }
+            }
 
             HFONT hFont = reinterpret_cast<HFONT>(DefSubclassProc(hwnd, WM_GETFONT, 0, 0));
             if (!hFont) hFont = static_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
@@ -1132,12 +1138,18 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
             if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) == 0) {
                 HDC hdc = reinterpret_cast<HDC>(wParam);
                 int saved = SaveDC(hdc);
+                // Only exclude 3D Direct3D/OpenGL viewport children ('Warcraft III' / 'OpenGL').
+                // Never exclude hollow frame controls (SS_ETCHEDFRAME / BS_GROUPBOX), or they leave white holes!
                 for (HWND ch = GetWindow(hwnd, GW_CHILD); ch != nullptr; ch = GetWindow(ch, GW_HWNDNEXT)) {
                     if (IsWindowVisible(ch)) {
-                        RECT rcCh = {};
-                        GetWindowRect(ch, &rcCh);
-                        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<LPPOINT>(&rcCh), 2);
-                        ExcludeClipRect(hdc, rcCh.left, rcCh.top, rcCh.right, rcCh.bottom);
+                        wchar_t chCls[64] = {};
+                        GetClassNameW(ch, chCls, 64);
+                        if (_wcsicmp(chCls, L"Warcraft III") == 0 || wcsstr(chCls, L"OpenGL") != nullptr) {
+                            RECT rcCh = {};
+                            GetWindowRect(ch, &rcCh);
+                            MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<LPPOINT>(&rcCh), 2);
+                            ExcludeClipRect(hdc, rcCh.left, rcCh.top, rcCh.right, rcCh.bottom);
+                        }
                     }
                 }
                 RECT rc = {};
@@ -1376,16 +1388,30 @@ static LRESULT CALLBACK DarkStaticShapeSubclassProc(
         RECT rc = {};
         GetClientRect(hwnd, &rc);
         DWORD st = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE) & SS_TYPEMASK);
-        if (st == SS_WHITERECT || st == SS_GRAYRECT || st == SS_BLACKRECT) {
+        if (st == SS_ETCHEDHORZ) {
             RawFillRect(hdc, &rc, gBrushBg);
-            Draw1PxBorder(hdc, rc, gColBorder);
-        } else if (st == SS_ETCHEDHORZ) {
             RECT rLine = { rc.left, rc.top, rc.right, rc.top + 1 };
             RawFillRect(hdc, &rLine, gBrushBorder);
         } else if (st == SS_ETCHEDVERT) {
+            RawFillRect(hdc, &rc, gBrushBg);
             RECT rLine = { rc.left, rc.top, rc.left + 1, rc.bottom };
             RawFillRect(hdc, &rLine, gBrushBorder);
         } else {
+            // Fill interior dark while clipping out any sibling controls (like Trigger Action Text links!) sitting inside this frame
+            int saved = SaveDC(hdc);
+            HWND hParent = GetParent(hwnd);
+            if (hParent) {
+                for (HWND sib = GetWindow(hParent, GW_CHILD); sib != nullptr; sib = GetWindow(sib, GW_HWNDNEXT)) {
+                    if (sib != hwnd && IsWindowVisible(sib)) {
+                        RECT rSib = {};
+                        GetWindowRect(sib, &rSib);
+                        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<LPPOINT>(&rSib), 2);
+                        ExcludeClipRect(hdc, rSib.left, rSib.top, rSib.right, rSib.bottom);
+                    }
+                }
+            }
+            RawFillRect(hdc, &rc, gBrushBg);
+            RestoreDC(hdc, saved);
             Draw1PxBorder(hdc, rc, gColBorder);
         }
         EndPaint(hwnd, &ps);

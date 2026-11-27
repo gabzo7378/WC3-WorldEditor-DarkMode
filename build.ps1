@@ -16,10 +16,11 @@ if ($LASTEXITCODE -ne 0) { throw "Error compilando launcher.rc" }
 if ($LASTEXITCODE -ne 0) { throw "Error compilando jngp_launcher.rc" }
 
 Write-Host "Compilando WE_DarkMode.dll (x86 32-bit - Classic + JNGP TESH/Scintilla)..."
-& $gpp -O2 -shared -std=c++17 -m32 -static-libgcc -static-libstdc++ "-Wl,-Bstatic" -lwinpthread "-Wl,-Bdynamic" `
+& $gpp -O2 -shared -std=c++17 -m32 -fno-exceptions -fno-rtti -static-libgcc -static-libstdc++ `
     "$dir\we_darkmode_dll.cpp" `
     -o "$dir\WE_DarkMode.dll" `
     -luser32 -lgdi32 -lcomctl32 -luxtheme -ldwmapi -lpsapi -lshlwapi `
+    "-Wl,-Bstatic" -l:libwinpthread.a "-Wl,-Bdynamic" `
     "-Wl,--kill-at"
 
 if ($LASTEXITCODE -ne 0) { throw "Error compilando WE_DarkMode.dll" }
@@ -55,4 +56,16 @@ New-Item -ItemType Directory -Force -Path $verJngpSub | Out-Null
 Copy-Item "$dir\NewGen_WE_Dark.exe"   (Join-Path $verJngp "NewGen_WE_Dark.exe")        -Force
 Copy-Item "$dir\WE_DarkMode.dll"      (Join-Path $verJngpSub "WE_DarkMode_JNGP.dll")   -Force
 
-Write-Host "Listo: WC3-Classic-1.21-1.27b y WC3-JNGP compilados y empaquetados."
+# 3. Verificacion automatica: cero DLLs externas de MinGW (solo DLLs nativas de Windows)
+$objdump = "C:\msys64\mingw32\bin\objdump.exe"
+foreach ($bin in @(
+    (Join-Path $verClassic "WorldEditor_Dark.exe"),
+    (Join-Path $verClassicSub "WE_DarkMode.dll"),
+    (Join-Path $verJngp "NewGen_WE_Dark.exe"),
+    (Join-Path $verJngpSub "WE_DarkMode_JNGP.dll")
+)) {
+    $bad = & $objdump -p $bin | Select-String -Pattern "DLL Name:.*(libgcc|libstdc|libwinpthread|msys)"
+    if ($bad) { throw "Dependencia externa prohibida en $bin : $bad" }
+}
+
+Write-Host "Listo: WC3-Classic-1.21-1.27b y WC3-JNGP compilados, verificados y empaquetados."

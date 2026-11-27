@@ -205,6 +205,10 @@ static thread_local bool gInInternalDraw     = false;
 static thread_local bool gInSubclassInternal = false;
 static thread_local bool tRetroStyled        = false;
 
+struct ActiveMsgFrame { HWND h; UINT m; };
+static thread_local ActiveMsgFrame tContainerActive[16] = {};
+static thread_local int            tContainerDepth      = 0;
+
 // ============================================================================
 // INI & Palette Loader
 // ============================================================================
@@ -1085,20 +1089,17 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
 {
     // Re-entrancy guard: if any third-party JNGP plugin creates a WndProc cycle on (hwnd, msg),
     // break it cleanly instead of overflowing the stack.
-    struct ActiveMsgFrame { HWND h; UINT m; };
-    static thread_local ActiveMsgFrame tActive[16] = {};
-    static thread_local int tDepth = 0;
-    for (int i = 0; i < tDepth; ++i) {
-        if (tActive[i].h == hwnd && tActive[i].m == msg) {
+    for (int i = 0; i < tContainerDepth; ++i) {
+        if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg) {
             return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
     }
     struct ScopePop {
-        int& d; bool pushed;
-        ~ScopePop() { if (pushed) --d; }
-    } pop{ tDepth, false };
-    if (tDepth < 16) {
-        tActive[tDepth++] = { hwnd, msg };
+        bool pushed;
+        ~ScopePop() { if (pushed) --tContainerDepth; }
+    } pop{ false };
+    if (tContainerDepth < 16) {
+        tContainerActive[tContainerDepth++] = { hwnd, msg };
         pop.pushed = true;
     }
 

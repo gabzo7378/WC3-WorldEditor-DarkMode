@@ -222,8 +222,17 @@ static thread_local bool gInSubclassInternal = false;
 static thread_local bool tRetroStyled        = false;
 
 struct ActiveMsgFrame { HWND h; UINT m; };
-static thread_local ActiveMsgFrame tContainerActive[16] = {};
+static thread_local ActiveMsgFrame tContainerActive[32] = {};
 static thread_local int            tContainerDepth      = 0;
+
+static void SafeSetWindowSubclass(HWND hwnd, SUBCLASSPROC pfn, UINT_PTR uId, DWORD_PTR dwRef) {
+    if (!hwnd || !IsWindow(hwnd)) return;
+    DWORD_PTR existing = 0;
+    if (GetWindowSubclass(hwnd, pfn, uId, &existing)) {
+        return; // Already attached: NEVER call SetWindowSubclass again (avoids ComCtl32 GWL_WNDPROC cycles!)
+    }
+    SetWindowSubclass(hwnd, pfn, uId, dwRef);
+}
 
 // ============================================================================
 // INI & Palette Loader
@@ -1103,21 +1112,24 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
     UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
 {
-    // Re-entrancy guard: if any third-party JNGP plugin creates a WndProc cycle on (hwnd, msg),
-    // break it cleanly instead of overflowing the stack.
+    if (gShuttingDown) {
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+    // Hard re-entrancy & depth guard: makes stack overflow (0xC000041D / 0xC00000FD) impossible
+    if (tContainerDepth >= 24) {
+        return 0;
+    }
     for (int i = 0; i < tContainerDepth; ++i) {
         if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg) {
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            return 0;
         }
     }
     struct ScopePop {
         bool pushed;
         ~ScopePop() { if (pushed) --tContainerDepth; }
     } pop{ false };
-    if (tContainerDepth < 16) {
-        tContainerActive[tContainerDepth++] = { hwnd, msg };
-        pop.pushed = true;
-    }
+    tContainerActive[tContainerDepth++] = { hwnd, msg };
+    pop.pushed = true;
 
     if (msg == kWmUahDrawMenu || msg == kWmUahDrawMenuItem || msg == WM_NCPAINT || msg == WM_NCACTIVATE) {
         LRESULT uahRes = 0;
@@ -1396,12 +1408,35 @@ static LRESULT CALLBACK DarkTabSubclassProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
     UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
 {
+    if (gShuttingDown) {
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+    if (tContainerDepth >= 24) {
+        return 0;
+    }
+    for (int i = 0; i < tContainerDepth; ++i) {
+        if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg) {
+            return 0;
+        }
+    }
+    struct TabPop {
+        bool pushed;
+        ~TabPop() { if (pushed) --tContainerDepth; }
+    } pop{ true };
+    tContainerActive[tContainerDepth++] = { hwnd, msg };
+
     if (msg == WM_ERASEBKGND) {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         RECT rc = {};
         GetClientRect(hwnd, &rc);
         RawFillRect(hdc, &rc, gBrushBg);
         return 1;
+    }
+    if (msg == WM_CTLCOLORDLG || msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, gColText);
+        SetBkColor(hdc, gColBg);
+        return reinterpret_cast<LRESULT>(gBrushBg);
     }
     if (msg == WM_NCDESTROY) {
         gInSubclassInternal = true;
@@ -1649,15 +1684,16 @@ static void StyleWindowDark(HWND hwnd) {
 
             if (!isChild) {
                 EnableDarkTitleBar(hwnd);
-                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else {
                 // Ensure the parent container handles WM_CTLCOLOR* & NM_CUSTOMDRAW (even if parent class is 'Warcraft III'!)
+                // Skip SysTabControl32 so we NEVER re-attach ComCtl32 MasterSubclassProc on top of Blizzard's 0x4cab80 TabProc!
                 HWND hParent = GetParent(hwnd);
                 if (hParent && IsWindow(hParent)) {
                     wchar_t pCls[96] = {};
                     GetClassNameW(hParent, pCls, 96);
-                    if (wcsstr(pCls, L"OpenGL") == nullptr) {
-                        SetWindowSubclass(hParent, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                    if (wcsstr(pCls, L"OpenGL") == nullptr && _wcsicmp(pCls, L"SysTabControl32") != 0) {
+                        SafeSetWindowSubclass(hParent, DarkContainerSubclassProc, kContainerSubclassId, 0);
                     }
                 }
             }
@@ -1675,16 +1711,16 @@ static void StyleWindowDark(HWND hwnd) {
                 HWND hHdr = ListView_GetHeader(hwnd);
                 if (hHdr) {
                     SetWindowTheme(hHdr, L"", L"");
-                    SetWindowSubclass(hHdr, DarkHeaderSubclassProc, kHeaderSubclassId, 0);
+                    SafeSetWindowSubclass(hHdr, DarkHeaderSubclassProc, kHeaderSubclassId, 0);
                 }
-                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"SysHeader32") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
-                SetWindowSubclass(hwnd, DarkHeaderSubclassProc, kHeaderSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkHeaderSubclassProc, kHeaderSubclassId, 0);
             } else if (_wcsicmp(cls, L"ComboBox") == 0 || _wcsicmp(cls, L"ComboBoxEx32") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
-                SetWindowSubclass(hwnd, DarkComboBoxSubclassProc, kComboSubclassId, 0);
-                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkComboBoxSubclassProc, kComboSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"Static") == 0) {
                 DWORD st = static_cast<DWORD>(style & SS_TYPEMASK);
                 if (st == SS_WHITERECT || st == SS_GRAYRECT || st == SS_BLACKRECT ||
@@ -1692,21 +1728,21 @@ static void StyleWindowDark(HWND hwnd) {
                     st == SS_ETCHEDFRAME || st == SS_ETCHEDHORZ || st == SS_ETCHEDVERT)
                 {
                     SetWindowTheme(hwnd, L"", L"");
-                    SetWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId, 0);
+                    SafeSetWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId, 0);
                 }
-                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"Button") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
-                SetWindowSubclass(hwnd, DarkButtonSubclassProc, kButtonSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkButtonSubclassProc, kButtonSubclassId, 0);
             } else if (_wcsicmp(cls, L"msctls_updown32") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
-                SetWindowSubclass(hwnd, DarkUpDownSubclassProc, kUpDownSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkUpDownSubclassProc, kUpDownSubclassId, 0);
             } else if (_wcsicmp(cls, L"Edit") == 0 || _wcsicmp(cls, L"ListBox") == 0 ||
                        _wcsicmp(cls, L"ComboLBox") == 0 || _wcsicmp(cls, L"ScrollBar") == 0) {
                 SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
             } else if (_wcsicmp(cls, L"Scintilla") == 0) {
                 SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
-                SetWindowSubclass(hwnd, DarkScintillaSubclassProc, kScintillaSubclassId, 1);
+                SafeSetWindowSubclass(hwnd, DarkScintillaSubclassProc, kScintillaSubclassId, 1);
                 InvalidateRect(hwnd, nullptr, TRUE);
             } else if (_wcsnicmp(cls, L"RichEdit", 8) == 0 || _wcsnicmp(cls, L"RICHEDIT", 8) == 0) {
                 SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
@@ -1718,21 +1754,20 @@ static void StyleWindowDark(HWND hwnd) {
                 SendMessageW(hwnd, EM_SETCHARFORMAT, SCF_ALL, reinterpret_cast<LPARAM>(&cf));
             } else if (_wcsicmp(cls, L"SysTabControl32") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
-                SetWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId, 0);
-                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId, 0);
             } else if (_wcsicmp(cls, L"ToolbarWindow32") == 0 || _wcsicmp(cls, L"ReBarWindow32") == 0 ||
                        _wcsicmp(cls, L"msctls_statusbar32") == 0 || _wcsicmp(cls, L"msctls_trackbar32") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
                 if (_wcsicmp(cls, L"msctls_statusbar32") == 0) {
                     SendMessageW(hwnd, SB_SETBKCOLOR, 0, static_cast<LPARAM>(gColSurface));
                 }
-                SetWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId, 0);
-                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"#32770") == 0 ||
                        wcsstr(cls, L"Afx") != nullptr || wcsstr(cls, L"WorldEdit") != nullptr ||
                        wcsstr(cls, L"MDIClient") != nullptr || wcsstr(cls, L"WE") != nullptr ||
                        wcsstr(cls, L"TESH") != nullptr) {
-                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             }
         }
     }

@@ -197,11 +197,13 @@ static constexpr UINT_PTR kButtonSubclassId    = 0x57454442;
 static constexpr UINT_PTR kUpDownSubclassId    = 0x57454455;
 static constexpr UINT_PTR kComboSubclassId     = 0x57454443;
 static constexpr UINT_PTR kStaticSubclassId    = 0x57454453;
+static constexpr UINT_PTR kScintillaSubclassId = 0x5745444A;
 
 static thread_local bool gInThemeRedirect    = false;
 static thread_local bool gInStyleWindow      = false;
 static thread_local bool gInInternalDraw     = false;
 static thread_local bool gInSubclassInternal = false;
+static thread_local bool tRetroStyled        = false;
 
 // ============================================================================
 // INI & Palette Loader
@@ -1420,6 +1422,174 @@ static LRESULT CALLBACK DarkStaticShapeSubclassProc(
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
+// ============================================================================
+// JNGP TESH / Scintilla vJASS Code Editor Dark Theme (TESH 0.7 & TESH 2.0)
+// ============================================================================
+static COLORREF LiftScintillaFgForDark(COLORREF col, bool isBold) {
+    BYTE r = GetRValue(col);
+    BYTE g = GetGValue(col);
+    BYTE b = GetBValue(col);
+    int luma = (r * 299 + g * 587 + b * 114) / 1000;
+
+    // Near-black: bold -> VS Code keyword blue (#569CD6), regular -> crisp code light (#DCDCDC)
+    if (r < 42 && g < 42 && b < 42) {
+        return isBold ? RGB(0x56, 0x9C, 0xD6) : RGB(0xDC, 0xDC, 0xDC);
+    }
+    // Dark purple/magenta (Native functions: CreateUnit, GetTriggerUnit...) -> vibrant lavender
+    if (r >= 80 && b >= 80 && g < 60 && luma < 140) {
+        return RGB(0xD2, 0xA8, 0xFF);
+    }
+    // Dark navy/blue (bold Native types: unit/real/integer -> emerald-teal; Constants/Events -> bright cyan)
+    if (b >= 110 && r < 75 && g < 115 && luma < 140) {
+        return isBold ? RGB(0x4E, 0xC9, 0xB0) : RGB(0x4F, 0xC1, 0xFF);
+    }
+    // Dark brown/amber (Templates / Legacy types) -> warm sand-gold
+    if (r >= 110 && g >= 45 && g <= 115 && b < 45 && luma < 140) {
+        return RGB(0xDC, 0xDC, 0xAA);
+    }
+    // Dark maroon (Constants in RGB order) -> bright sky-blue
+    if (r >= 130 && r < 200 && g < 45 && b < 45) {
+        return RGB(0x79, 0xC0, 0xFF);
+    }
+    // Pure/bright red (BJ functions) -> soft readable coral-red
+    if (r >= 200 && g < 60 && b < 60) {
+        return RGB(0xFF, 0x7B, 0x72);
+    }
+    // Dark green (bold Escape chars -> warm amber; Comments -> pleasant sage-mint green)
+    if (g >= 95 && r < 55 && b < 55) {
+        return isBold ? RGB(0xD7, 0xBA, 0x7D) : RGB(0x6A, 0xB8, 0x5A);
+    }
+    if (luma < 105) {
+        int nr = r + 100; if (nr > 235) nr = 235;
+        int ng = g + 100; if (ng > 235) ng = 235;
+        int nb = b + 100; if (nb > 235) nb = 235;
+        return RGB(nr, ng, nb);
+    }
+    return col;
+}
+
+static void ApplyDarkThemeToScintilla(HWND hwnd) {
+    static constexpr UINT kSciStyleSetFore        = 2051;
+    static constexpr UINT kSciStyleSetBack        = 2052;
+    static constexpr UINT kSciStyleGetFore        = 2481;
+    static constexpr UINT kSciStyleGetBack        = 2482;
+    static constexpr UINT kSciStyleGetBold        = 2483;
+    static constexpr UINT kSciSetSelFore          = 2067;
+    static constexpr UINT kSciSetSelBack          = 2068;
+    static constexpr UINT kSciSetCaretFore        = 2069;
+    static constexpr UINT kSciSetCaretLineBack    = 2098;
+    static constexpr UINT kSciIndicSetFore        = 2082;
+    static constexpr UINT kSciIndicGetFore        = 2083;
+    static constexpr UINT kSciSetWhitespaceBack   = 2085;
+    static constexpr UINT kSciMarkerSetFore       = 2041;
+    static constexpr UINT kSciMarkerSetBack       = 2042;
+    static constexpr UINT kSciCallTipSetBack      = 2205;
+    static constexpr UINT kSciCallTipSetFore      = 2206;
+    static constexpr UINT kSciCallTipSetForeHlt   = 2207;
+    static constexpr UINT kSciSetFoldMarginColour = 2290;
+    static constexpr UINT kSciSetFoldMarginHiCol  = 2291;
+    static constexpr UINT kSciSetEdgeColour       = 2365;
+
+    const COLORREF codeBg   = RGB(0x14, 0x14, 0x17);
+    const COLORREF gutterBg = RGB(0x1B, 0x1B, 0x20);
+    const COLORREF gutterFg = RGB(0x78, 0x80, 0x90);
+
+    for (int s = 0; s <= 255; ++s) {
+        if (s == 33) { // STYLE_LINENUMBER
+            DefSubclassProc(hwnd, kSciStyleSetBack, s, gutterBg);
+            DefSubclassProc(hwnd, kSciStyleSetFore, s, gutterFg);
+            continue;
+        }
+        if (s == 34) { // STYLE_BRACELIGHT
+            DefSubclassProc(hwnd, kSciStyleSetBack, s, gColAccent);
+            DefSubclassProc(hwnd, kSciStyleSetFore, s, RGB(0xFF, 0xE0, 0x66));
+            continue;
+        }
+        if (s == 35) { // STYLE_BRACEBAD
+            DefSubclassProc(hwnd, kSciStyleSetBack, s, RGB(0x5A, 0x1E, 0x24));
+            DefSubclassProc(hwnd, kSciStyleSetFore, s, RGB(0xFF, 0x80, 0x80));
+            continue;
+        }
+        if (s == 37) { // STYLE_INDENTGUIDE
+            DefSubclassProc(hwnd, kSciStyleSetBack, s, codeBg);
+            DefSubclassProc(hwnd, kSciStyleSetFore, s, RGB(0x34, 0x36, 0x40));
+            continue;
+        }
+        if (s == 38) { // STYLE_CALLTIP
+            DefSubclassProc(hwnd, kSciStyleSetBack, s, RGB(0x20, 0x20, 0x26));
+            DefSubclassProc(hwnd, kSciStyleSetFore, s, RGB(0xDC, 0xDC, 0xDC));
+            continue;
+        }
+
+        COLORREF bg = static_cast<COLORREF>(DefSubclassProc(hwnd, kSciStyleGetBack, s, 0));
+        COLORREF fg = static_cast<COLORREF>(DefSubclassProc(hwnd, kSciStyleGetFore, s, 0));
+        bool bold   = DefSubclassProc(hwnd, kSciStyleGetBold, s, 0) != 0;
+
+        if (s == 32 || (GetRValue(bg) > 160 && GetGValue(bg) > 160 && GetBValue(bg) > 160)) {
+            DefSubclassProc(hwnd, kSciStyleSetBack, s, codeBg);
+        }
+        DefSubclassProc(hwnd, kSciStyleSetFore, s, LiftScintillaFgForDark(fg, bold));
+    }
+
+    // Caret, active line, selection, fold margin, 120-col vertical guide, fold markers (25..31), indicators & calltips
+    DefSubclassProc(hwnd, kSciSetCaretFore,        RGB(0xFF, 0xFF, 0xFF), 0);
+    DefSubclassProc(hwnd, kSciSetCaretLineBack,    RGB(0x22, 0x26, 0x30), 0);
+    DefSubclassProc(hwnd, kSciSetSelFore,          0, 0); // Preserve syntax colors inside selection
+    DefSubclassProc(hwnd, kSciSetSelBack,          1, gColAccent);
+    DefSubclassProc(hwnd, kSciSetWhitespaceBack,   1, codeBg);
+    DefSubclassProc(hwnd, kSciSetFoldMarginColour, 1, gutterBg);
+    DefSubclassProc(hwnd, kSciSetFoldMarginHiCol,  1, gutterBg);
+    DefSubclassProc(hwnd, kSciSetEdgeColour,       RGB(0x2B, 0x2E, 0x38), 0);
+
+    for (int m = 25; m <= 31; ++m) {
+        DefSubclassProc(hwnd, kSciMarkerSetFore, m, gutterBg);
+        DefSubclassProc(hwnd, kSciMarkerSetBack, m, RGB(0x82, 0x8A, 0x98));
+    }
+
+    for (int ind = 0; ind <= 2; ++ind) {
+        COLORREF indFg = static_cast<COLORREF>(DefSubclassProc(hwnd, kSciIndicGetFore, ind, 0));
+        if (GetRValue(indFg) < 40 && GetGValue(indFg) < 40 && GetBValue(indFg) < 40) {
+            DefSubclassProc(hwnd, kSciIndicSetFore, ind, RGB(0x6C, 0xB8, 0xFF));
+        }
+    }
+
+    DefSubclassProc(hwnd, kSciCallTipSetBack,    RGB(0x20, 0x20, 0x26), 0);
+    DefSubclassProc(hwnd, kSciCallTipSetFore,    RGB(0xDC, 0xDC, 0xDC), 0);
+    DefSubclassProc(hwnd, kSciCallTipSetForeHlt, RGB(0x6C, 0xB8, 0xFF), 0);
+}
+
+static LRESULT CALLBACK DarkScintillaSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR dwRefData)
+{
+    if (msg == WM_NCDESTROY) {
+        gInSubclassInternal = true;
+        RemoveWindowSubclass(hwnd, DarkScintillaSubclassProc, kScintillaSubclassId);
+        gInSubclassInternal = false;
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+    // Track whenever TESH configures or reloads styles.ini so next WM_PAINT converts all 256 styles cleanly
+    if (msg == 2050 /* SCI_STYLECLEARALL */ ||
+        msg == 2051 /* SCI_STYLESETFORE */  ||
+        msg == 2052 /* SCI_STYLESETBACK */  ||
+        msg == 2053 /* SCI_STYLESETBOLD */)
+    {
+        LRESULT res = DefSubclassProc(hwnd, msg, wParam, lParam);
+        if (dwRefData == 0) {
+            SetWindowSubclass(hwnd, DarkScintillaSubclassProc, kScintillaSubclassId, 1);
+        }
+        return res;
+    }
+    if (msg == WM_PAINT) {
+        COLORREF defBg = static_cast<COLORREF>(DefSubclassProc(hwnd, 2482 /* SCI_STYLEGETBACK */, 32, 0));
+        if (dwRefData != 0 || GetRValue(defBg) > 60 || GetGValue(defBg) > 60 || GetBValue(defBg) > 60) {
+            SetWindowSubclass(hwnd, DarkScintillaSubclassProc, kScintillaSubclassId, 0);
+            ApplyDarkThemeToScintilla(hwnd);
+        }
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 static void StyleWindowDark(HWND hwnd);
 
 static BOOL CALLBACK EnumChildStyleProc(HWND child, LPARAM /*lParam*/) {
@@ -1496,6 +1666,10 @@ static void StyleWindowDark(HWND hwnd) {
             } else if (_wcsicmp(cls, L"Edit") == 0 || _wcsicmp(cls, L"ListBox") == 0 ||
                        _wcsicmp(cls, L"ComboLBox") == 0 || _wcsicmp(cls, L"ScrollBar") == 0) {
                 SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+            } else if (_wcsicmp(cls, L"Scintilla") == 0) {
+                SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+                SetWindowSubclass(hwnd, DarkScintillaSubclassProc, kScintillaSubclassId, 1);
+                InvalidateRect(hwnd, nullptr, TRUE);
             } else if (_wcsnicmp(cls, L"RichEdit", 8) == 0 || _wcsnicmp(cls, L"RICHEDIT", 8) == 0) {
                 SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
                 SendMessageW(hwnd, EM_SETBKGNDCOLOR, 0, static_cast<LPARAM>(gColInput));
@@ -1518,7 +1692,8 @@ static void StyleWindowDark(HWND hwnd) {
                 SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"#32770") == 0 ||
                        wcsstr(cls, L"Afx") != nullptr || wcsstr(cls, L"WorldEdit") != nullptr ||
-                       wcsstr(cls, L"MDIClient") != nullptr || wcsstr(cls, L"WE") != nullptr) {
+                       wcsstr(cls, L"MDIClient") != nullptr || wcsstr(cls, L"WE") != nullptr ||
+                       wcsstr(cls, L"TESH") != nullptr) {
                 SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             }
         }
@@ -1538,9 +1713,22 @@ static LRESULT CALLBACK CbtHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
     return CallNextHookEx(tCbtHook, nCode, wParam, lParam);
 }
 
+static BOOL CALLBACK RetroEnumThreadWndProc(HWND hwnd, LPARAM /*lParam*/) {
+    StyleWindowDark(hwnd);
+    EnumChildWindows(hwnd, EnumChildStyleProc, 0);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    if (GetMenu(hwnd) != nullptr) DrawMenuBar(hwnd);
+    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    return TRUE;
+}
+
 static void EnsureLiveCbtHookOnUiThread() {
     if (!tCbtHook) {
         tCbtHook = SetWindowsHookExW(WH_CBT, CbtHookProc, nullptr, GetCurrentThreadId());
+    }
+    if (!tRetroStyled) {
+        tRetroStyled = true;
+        EnumThreadWindows(GetCurrentThreadId(), RetroEnumThreadWndProc, 0);
     }
 }
 
@@ -1548,8 +1736,11 @@ static void EnsureLiveCbtHookOnUiThread() {
 // Detour Implementations (Hot-Patched on user32.dll & uxtheme.dll)
 // ============================================================================
 static DWORD WINAPI DetourGetSysColor(int nIndex) {
-    if (!gInInternalDraw && nIndex >= 0 && nIndex < 32 && gSysColorOverride[nIndex]) {
-        return gSysColors[nIndex];
+    if (!gInInternalDraw) {
+        if (!tCbtHook) EnsureLiveCbtHookOnUiThread();
+        if (nIndex >= 0 && nIndex < 32 && gSysColorOverride[nIndex]) {
+            return gSysColors[nIndex];
+        }
     }
     return reinterpret_cast<fnGetSysColor>(gHpGetSysColor.origEntry)(nIndex);
 }
@@ -1562,18 +1753,21 @@ static HBRUSH WINAPI DetourGetSysColorBrush(int nIndex) {
 }
 
 static int WINAPI DetourFillRect(HDC hDC, const RECT* lprc, HBRUSH hbr) {
-    if (!gInInternalDraw && hbr) {
-        uintptr_t v = reinterpret_cast<uintptr_t>(hbr);
-        if (v >= 1 && v <= 32) {
-            int idx = static_cast<int>(v - 1);
-            if (gSysColorOverride[idx] && gSysBrushes[idx]) {
-                hbr = gSysBrushes[idx];
-            }
-        } else {
-            LOGBRUSH lb = {};
-            if (GetObjectW(hbr, sizeof(lb), &lb) == sizeof(lb) && lb.lbStyle == BS_SOLID) {
-                if (GetRValue(lb.lbColor) > 215 && GetGValue(lb.lbColor) > 215 && GetBValue(lb.lbColor) > 215) {
-                    hbr = gBrushBg;
+    if (!gInInternalDraw) {
+        if (!tCbtHook) EnsureLiveCbtHookOnUiThread();
+        if (hbr) {
+            uintptr_t v = reinterpret_cast<uintptr_t>(hbr);
+            if (v >= 1 && v <= 32) {
+                int idx = static_cast<int>(v - 1);
+                if (gSysColorOverride[idx] && gSysBrushes[idx]) {
+                    hbr = gSysBrushes[idx];
+                }
+            } else {
+                LOGBRUSH lb = {};
+                if (GetObjectW(hbr, sizeof(lb), &lb) == sizeof(lb) && lb.lbStyle == BS_SOLID) {
+                    if (GetRValue(lb.lbColor) > 215 && GetGValue(lb.lbColor) > 215 && GetBValue(lb.lbColor) > 215) {
+                        hbr = gBrushBg;
+                    }
                 }
             }
         }
@@ -1702,6 +1896,7 @@ static void StripOurSubclassesBeforeRehook(HWND hwnd) {
     RemoveWindowSubclass(hwnd, DarkComboBoxSubclassProc,    kComboSubclassId);
     RemoveWindowSubclass(hwnd, DarkUpDownSubclassProc,      kUpDownSubclassId);
     RemoveWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId);
+    RemoveWindowSubclass(hwnd, DarkScintillaSubclassProc,   kScintillaSubclassId);
     RemoveWindowSubclass(hwnd, DarkHeaderSubclassProc,      kHeaderSubclassId);
     RemoveWindowSubclass(hwnd, DarkTabSubclassProc,         kTabSubclassId);
     RemoveWindowSubclass(hwnd, DarkContainerSubclassProc,   kContainerSubclassId);
@@ -1862,12 +2057,23 @@ static void InitUxThemeAndDwm() {
     }
 }
 
+static BOOL CALLBACK WakeProcessWindowsProc(HWND hwnd, LPARAM lParam) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid == static_cast<DWORD>(lParam)) {
+        PostMessageW(hwnd, WM_SYSCOLORCHANGE, 0, 0);
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN);
+    }
+    return TRUE;
+}
+
 extern "C" __declspec(dllexport) DWORD WINAPI InitializeDarkMode(LPVOID /*lpThreadId*/) {
     if (InterlockedExchange(&gInitialized, 1) != 0)
         return 1;
 
     LoadPaletteAndBrushes();
     InitUxThemeAndDwm();
+    EnumWindows(WakeProcessWindowsProc, static_cast<LPARAM>(GetCurrentProcessId()));
     return 1;
 }
 

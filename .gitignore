@@ -1,6 +1,7 @@
-# Compilados temporales en la raíz (la versión lista para usar vive en su carpeta dedicada)
+# Compilados temporales en la raíz (las versiones listas para usar viven en sus carpetas dedicadas)
 /WE_DarkMode.dll
 /WorldEditor_Dark.exe
+/NewGen_WE_Dark.exe
 /Para_Copiar_A_WC3/
 
 # Objetos y temporales

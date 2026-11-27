@@ -1,0 +1,27 @@
+======================================================================
+  Jass NewGen Pack (JNGP) — Modo UltraDark Portátil (NewGen_WE_Dark)
+======================================================================
+
+Compatible con:
+  - Jass New Gen Pack Rebuild
+  - JNGP 2.0.x / 1.4g / 5d (Grimoire + TESH 0.7 y TESH 2.0 / Scintilla)
+
+INSTALACIÓN (100% Portátil, sin alterar archivos originales):
+  1. Copia estos dos elementos dentro de la carpeta raíz de tu JNGP
+     (justo al lado de "NewGen WE.exe"):
+
+       <Carpeta de Jass NewGen Pack>\
+       ├── NewGen WE.exe              <-- Lanzador original (intacto)
+       ├── NewGen_WE_Dark.exe         <-- Lanzador en Modo Oscuro
+       └── WE_DarkMode\
+           ├── WE_DarkMode_JNGP.dll   <-- Motor UltraDark + TESH/Scintilla
+           └── WE_DarkMode.ini        <-- Colores personalizables
+
+  2. Abre "NewGen_WE_Dark.exe" cuando quieras trabajar en Modo Oscuro,
+     o "NewGen WE.exe" cuando quieras abrirlo en el modo claro normal.
+
+NOTA:
+  - No modifica we.lua, we.conf.lua, NewGen WE.exe, worldedit121.exe
+    ni tesh\config\styles.ini en disco.
+  - Convierte automáticamente el editor de código vJASS (TESH / Scintilla)
+    a tema oscuro de alto contraste (paleta tipo VS Code Dark+).

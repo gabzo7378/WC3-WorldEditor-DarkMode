@@ -1,1 +1,31 @@
+#include <winver.h>
+
 1 ICON "classic_dark.ico"
+
+1 VERSIONINFO
+FILEVERSION     1,2,0,0
+PRODUCTVERSION  1,2,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "WC3-WorldEditor-DarkMode"
+            VALUE "FileDescription",  "Warcraft III World Editor UltraDark Launcher"
+            VALUE "FileVersion",      "1.2.0.0"
+            VALUE "InternalName",     "WorldEditor_Dark"
+            VALUE "OriginalFilename", "WorldEditor_Dark.exe"
+            VALUE "ProductName",      "WC3 World Editor Dark Mode"
+            VALUE "ProductVersion",   "1.2.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

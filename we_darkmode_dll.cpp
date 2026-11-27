@@ -2080,7 +2080,18 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeDarkMode(LPVOID /*lpThre
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpReserved*/) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         gSelfModule = hModule;
-    } else if (ul_reason_for_call == DLL_THREAD_DETACH || ul_reason_for_call == DLL_PROCESS_DETACH) {
+        DisableThreadLibraryCalls(hModule);
+        // When loaded via JNGP's native bin\exehack.exe (grim.injectdll -> LoadLibraryA),
+        // WE_DarkMode_JNGP.dll auto-initializes safely outside the OS loader lock.
+        wchar_t modPath[MAX_PATH] = {};
+        if (GetModuleFileNameW(hModule, modPath, MAX_PATH) > 0) {
+            const wchar_t* base = PathFindFileNameW(modPath);
+            if (base && (wcsstr(base, L"JNGP") != nullptr || wcsstr(base, L"jngp") != nullptr)) {
+                HANDLE hThread = CreateThread(nullptr, 0, InitializeDarkMode, nullptr, 0, nullptr);
+                if (hThread) CloseHandle(hThread);
+            }
+        }
+    } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         if (tCbtHook) {
             UnhookWindowsHookEx(tCbtHook);
             tCbtHook = nullptr;

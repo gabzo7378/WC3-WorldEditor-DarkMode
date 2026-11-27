@@ -228,7 +228,7 @@ static thread_local int            tContainerDepth      = 0;
 static wchar_t gGuardPath[MAX_PATH] = {};
 static volatile LONG gGuardLogCount = 0;
 
-// Records (up to 24 times) the window/message that tripped a re-entrancy guard -> WE_DarkMode\guard_diag.txt
+// Debug only (needs WE_DarkMode\debug.flag): records the window/message that tripped a re-entrancy guard -> guard_diag.txt
 static void LogGuardHit(const char* tag, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (!gGuardPath[0] || InterlockedIncrement(&gGuardLogCount) > 24) return;
     HANDLE h = CreateFileW(gGuardPath, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -2338,8 +2338,15 @@ static void InstallCrashDiag() {
     wchar_t* slash = wcsrchr(gDiagPath, L'\\');
     if (!slash) return;
     wcscpy(slash + 1, L"crash_diag.txt");
-    wcscpy(gGuardPath, gDiagPath);
-    wcscpy(wcsrchr(gGuardPath, L'\\') + 1, L"guard_diag.txt");
+    // Re-entrancy hits (nested WM_WINDOWPOSCHANGED inside WM_SIZE) are expected and harmless;
+    // only log them when a "debug.flag" file sits next to the DLL.
+    wchar_t flag[MAX_PATH];
+    wcscpy(flag, gDiagPath);
+    wcscpy(wcsrchr(flag, L'\\') + 1, L"debug.flag");
+    if (GetFileAttributesW(flag) != INVALID_FILE_ATTRIBUTES) {
+        wcscpy(gGuardPath, gDiagPath);
+        wcscpy(wcsrchr(gGuardPath, L'\\') + 1, L"guard_diag.txt");
+    }
     gVehHandle = AddVectoredExceptionHandler(1, CrashDiagVeh);
 }
 

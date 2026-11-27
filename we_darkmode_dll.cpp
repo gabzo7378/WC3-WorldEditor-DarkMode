@@ -225,10 +225,31 @@ struct ActiveMsgFrame { HWND h; UINT m; };
 static thread_local ActiveMsgFrame tContainerActive[32] = {};
 static thread_local int            tContainerDepth      = 0;
 
+using fnGetWindowSubclass = BOOL(WINAPI*)(HWND, SUBCLASSPROC, UINT_PTR, DWORD_PTR*);
+
+static BOOL SafeQueryWindowSubclass(HWND hwnd, SUBCLASSPROC pfn, UINT_PTR uId, DWORD_PTR* pRef) {
+    static fnGetWindowSubclass sFn = nullptr;
+    static bool sResolved = false;
+    if (!sResolved) {
+        HMODULE hCc = GetModuleHandleW(L"comctl32.dll");
+        if (!hCc) hCc = LoadLibraryW(L"comctl32.dll");
+        if (hCc) {
+            // In non-manifested ComCtl32 v5.82 (used by worldedit.exe / worldedit121.exe),
+            // GetWindowSubclass is exported ONLY by ordinal 411, NOT by name!
+            sFn = reinterpret_cast<fnGetWindowSubclass>(GetProcAddress(hCc, "GetWindowSubclass"));
+            if (!sFn) {
+                sFn = reinterpret_cast<fnGetWindowSubclass>(GetProcAddress(hCc, MAKEINTRESOURCEA(411)));
+            }
+        }
+        sResolved = true;
+    }
+    return sFn ? sFn(hwnd, pfn, uId, pRef) : FALSE;
+}
+
 static void SafeSetWindowSubclass(HWND hwnd, SUBCLASSPROC pfn, UINT_PTR uId, DWORD_PTR dwRef) {
     if (!hwnd || !IsWindow(hwnd)) return;
     DWORD_PTR existing = 0;
-    if (GetWindowSubclass(hwnd, pfn, uId, &existing)) {
+    if (SafeQueryWindowSubclass(hwnd, pfn, uId, &existing)) {
         return; // Already attached: NEVER call SetWindowSubclass again (avoids ComCtl32 GWL_WNDPROC cycles!)
     }
     SetWindowSubclass(hwnd, pfn, uId, dwRef);

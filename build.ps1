@@ -64,8 +64,8 @@ foreach ($bin in @(
     (Join-Path $verJngp "NewGen_WE_Dark.exe"),
     (Join-Path $verJngpSub "WE_DarkMode_JNGP.dll")
 )) {
-    $bad = & $objdump -p $bin | Select-String -Pattern "DLL Name:.*(libgcc|libstdc|libwinpthread|msys)"
-    if ($bad) { throw "Dependencia externa prohibida en $bin : $bad" }
+    $bad = & $objdump -p $bin | Select-String -Pattern "DLL Name:.*(libgcc|libstdc|libwinpthread|msys)|GetWindowSubclass"
+    if ($bad) { throw "Dependencia externa o simbolo incompatible en $bin : $bad" }
 }
 
 Write-Host "Listo: WC3-Classic-1.21-1.27b y WC3-JNGP compilados, verificados y empaquetados."

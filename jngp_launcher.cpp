@@ -126,9 +126,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     STARTUPINFOW si = {};
     si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi = {};
 
-    if (CreateProcessW(exeHack, cmdLine, nullptr, nullptr, FALSE, 0, nullptr, baseDir, &si, &pi)) {
+    if (CreateProcessW(exeHack, cmdLine, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, baseDir, &si, &pi)) {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
         return 0;
@@ -141,7 +143,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         sei.lpFile       = exeHack;
         sei.lpParameters = params;
         sei.lpDirectory  = baseDir;
-        sei.nShow        = SW_SHOWNORMAL;
+        sei.nShow        = SW_HIDE;
         if (ShellExecuteExW(&sei)) return 0;
     }
 

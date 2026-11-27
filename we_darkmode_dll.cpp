@@ -1083,9 +1083,30 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
     UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
 {
-    LRESULT uahRes = 0;
-    if (HandleUahMenuMessage(hwnd, msg, wParam, lParam, &uahRes)) {
-        return uahRes;
+    // Re-entrancy guard: if any third-party JNGP plugin creates a WndProc cycle on (hwnd, msg),
+    // break it cleanly instead of overflowing the stack.
+    struct ActiveMsgFrame { HWND h; UINT m; };
+    static thread_local ActiveMsgFrame tActive[16] = {};
+    static thread_local int tDepth = 0;
+    for (int i = 0; i < tDepth; ++i) {
+        if (tActive[i].h == hwnd && tActive[i].m == msg) {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        }
+    }
+    struct ScopePop {
+        int& d; bool pushed;
+        ~ScopePop() { if (pushed) --d; }
+    } pop{ tDepth, false };
+    if (tDepth < 16) {
+        tActive[tDepth++] = { hwnd, msg };
+        pop.pushed = true;
+    }
+
+    if (msg == kWmUahDrawMenu || msg == kWmUahDrawMenuItem || msg == WM_NCPAINT || msg == WM_NCACTIVATE) {
+        LRESULT uahRes = 0;
+        if (HandleUahMenuMessage(hwnd, msg, wParam, lParam, &uahRes)) {
+            return uahRes;
+        }
     }
 
     switch (msg) {
@@ -1902,9 +1923,31 @@ static void StripOurSubclassesBeforeRehook(HWND hwnd) {
     RemoveWindowSubclass(hwnd, DarkContainerSubclassProc,   kContainerSubclassId);
 }
 
+static bool IsBlizzardDialogControlForRehook(HWND hwnd) {
+    // Only Blizzard's COsControl dialog child controls overwrite GWL_WNDPROC to 0x45a980.
+    // Top-level/container windows must NEVER be stripped & re-hooked here because JNGP plugins
+    // (wehack.dll, tesh.dll, japi.dll) save GetWindowLong(GWL_WNDPROC) before SetWindowLong,
+    // so re-attaching ComCtl32 MasterSubclassProc on top of them creates a recursive call cycle!
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if ((style & WS_CHILD) == 0) return false;
+
+    wchar_t cls[64] = {};
+    if (GetClassNameW(hwnd, cls, 64) <= 0) return false;
+    return _wcsicmp(cls, L"Button") == 0 ||
+           _wcsicmp(cls, L"ComboBox") == 0 ||
+           _wcsicmp(cls, L"ComboBoxEx32") == 0 ||
+           _wcsicmp(cls, L"msctls_updown32") == 0 ||
+           _wcsicmp(cls, L"Static") == 0 ||
+           _wcsicmp(cls, L"SysHeader32") == 0 ||
+           _wcsicmp(cls, L"SysTabControl32") == 0 ||
+           _wcsicmp(cls, L"ToolbarWindow32") == 0;
+}
+
 static LONG WINAPI DetourSetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong) {
     auto orig = reinterpret_cast<fnSetWindowLongA>(gHpSetWindowLongA.origEntry);
-    if (nIndex == GWL_WNDPROC && !gInStyleWindow && !gInSubclassInternal && hWnd && IsWindow(hWnd)) {
+    if (nIndex == GWL_WNDPROC && !gInStyleWindow && !gInSubclassInternal && hWnd && IsWindow(hWnd) &&
+        IsBlizzardDialogControlForRehook(hWnd))
+    {
         gInSubclassInternal = true;
         StripOurSubclassesBeforeRehook(hWnd);
         LONG ret = orig(hWnd, nIndex, dwNewLong);
@@ -1917,7 +1960,9 @@ static LONG WINAPI DetourSetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong) {
 
 static LONG WINAPI DetourSetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong) {
     auto orig = reinterpret_cast<fnSetWindowLongW>(gHpSetWindowLongW.origEntry);
-    if (nIndex == GWL_WNDPROC && !gInStyleWindow && !gInSubclassInternal && hWnd && IsWindow(hWnd)) {
+    if (nIndex == GWL_WNDPROC && !gInStyleWindow && !gInSubclassInternal && hWnd && IsWindow(hWnd) &&
+        IsBlizzardDialogControlForRehook(hWnd))
+    {
         gInSubclassInternal = true;
         StripOurSubclassesBeforeRehook(hWnd);
         LONG ret = orig(hWnd, nIndex, dwNewLong);

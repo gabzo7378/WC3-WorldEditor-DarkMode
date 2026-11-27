@@ -1,21 +1,21 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 $gpp     = "C:\msys64\mingw32\bin\g++.exe"
 $windres = "C:\msys64\mingw32\bin\windres.exe"
 if (-not (Test-Path $gpp)) {
-    throw "No se encontró el compilador 32-bit en $gpp"
+    throw "No se encontro el compilador 32-bit en $gpp"
 }
 
 $dir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $env:PATH = "C:\msys64\mingw32\bin;" + $env:PATH
 
-Write-Host "Compilando recursos de ícono y versión (Clásico 5 HD + JNGP 2 HD)..."
+Write-Host "Compilando recursos de icono y version (Clasico 5 HD + JNGP 2 HD)..."
 & $windres "$dir\launcher.rc" -O coff -o "$dir\launcher_res.o"
 if ($LASTEXITCODE -ne 0) { throw "Error compilando launcher.rc" }
 
 & $windres "$dir\jngp_launcher.rc" -O coff -o "$dir\jngp_launcher_res.o"
 if ($LASTEXITCODE -ne 0) { throw "Error compilando jngp_launcher.rc" }
 
-Write-Host "Compilando WE_DarkMode.dll (x86 32-bit — Classic + JNGP TESH/Scintilla)..."
+Write-Host "Compilando WE_DarkMode.dll (x86 32-bit - Classic + JNGP TESH/Scintilla)..."
 & $gpp -O2 -shared -std=c++17 -m32 -static-libgcc -static-libstdc++ "-Wl,-Bstatic" -lwinpthread "-Wl,-Bdynamic" `
     "$dir\we_darkmode_dll.cpp" `
     -o "$dir\WE_DarkMode.dll" `
@@ -24,7 +24,7 @@ Write-Host "Compilando WE_DarkMode.dll (x86 32-bit — Classic + JNGP TESH/Scint
 
 if ($LASTEXITCODE -ne 0) { throw "Error compilando WE_DarkMode.dll" }
 
-Write-Host "Compilando WorldEditor_Dark.exe (x86 32-bit — ícono Clásico 5 HD)..."
+Write-Host "Compilando WorldEditor_Dark.exe (x86 32-bit - icono Clasico 5 HD)..."
 & $gpp -O2 -mwindows -municode -std=c++17 -m32 -static `
     "$dir\launcher.cpp" "$dir\launcher_res.o" `
     -o "$dir\WorldEditor_Dark.exe" `
@@ -32,7 +32,7 @@ Write-Host "Compilando WorldEditor_Dark.exe (x86 32-bit — ícono Clásico 5 HD
 
 if ($LASTEXITCODE -ne 0) { throw "Error compilando WorldEditor_Dark.exe" }
 
-Write-Host "Compilando NewGen_WE_Dark.exe (x86 32-bit ligero sin inyección — ícono JNGP 2 HD)..."
+Write-Host "Compilando NewGen_WE_Dark.exe (x86 32-bit ligero sin inyeccion - icono JNGP 2 HD)..."
 & $gpp -O2 -mwindows -municode -std=c++17 -m32 -static-libgcc `
     "$dir\jngp_launcher.cpp" "$dir\jngp_launcher_res.o" `
     -o "$dir\NewGen_WE_Dark.exe" `

@@ -221,7 +221,7 @@ static thread_local bool gInInternalDraw     = false;
 static thread_local bool gInSubclassInternal = false;
 static thread_local bool tRetroStyled        = false;
 
-struct ActiveMsgFrame { HWND h; UINT m; };
+struct ActiveMsgFrame { HWND h; UINT m; UINT_PTR id; };
 static thread_local ActiveMsgFrame tContainerActive[32] = {};
 static thread_local int            tContainerDepth      = 0;
 
@@ -1137,19 +1137,19 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
         return DefSubclassProc(hwnd, msg, wParam, lParam);
     }
     // Hard re-entrancy & depth guard: makes stack overflow (0xC000041D / 0xC00000FD) impossible
-    if (tContainerDepth >= 24) {
-        return 0;
+    if (tContainerDepth >= 28) {
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     for (int i = 0; i < tContainerDepth; ++i) {
-        if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg) {
-            return 0;
+        if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg && tContainerActive[i].id == kContainerSubclassId) {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
     }
     struct ScopePop {
         bool pushed;
         ~ScopePop() { if (pushed) --tContainerDepth; }
     } pop{ false };
-    tContainerActive[tContainerDepth++] = { hwnd, msg };
+    tContainerActive[tContainerDepth++] = { hwnd, msg, kContainerSubclassId };
     pop.pushed = true;
 
     if (msg == kWmUahDrawMenu || msg == kWmUahDrawMenuItem || msg == WM_NCPAINT || msg == WM_NCACTIVATE) {
@@ -1432,19 +1432,19 @@ static LRESULT CALLBACK DarkTabSubclassProc(
     if (gShuttingDown) {
         return DefSubclassProc(hwnd, msg, wParam, lParam);
     }
-    if (tContainerDepth >= 24) {
-        return 0;
+    if (tContainerDepth >= 28) {
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
     for (int i = 0; i < tContainerDepth; ++i) {
-        if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg) {
-            return 0;
+        if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg && tContainerActive[i].id == kTabSubclassId) {
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
         }
     }
     struct TabPop {
         bool pushed;
         ~TabPop() { if (pushed) --tContainerDepth; }
     } pop{ true };
-    tContainerActive[tContainerDepth++] = { hwnd, msg };
+    tContainerActive[tContainerDepth++] = { hwnd, msg, kTabSubclassId };
 
     if (msg == WM_ERASEBKGND) {
         HDC hdc = reinterpret_cast<HDC>(wParam);

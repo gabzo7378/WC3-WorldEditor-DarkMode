@@ -1716,6 +1716,16 @@ static bool IsDelphiOrTeshWindow(HWND hwnd, const wchar_t* cls) {
     return false;
 }
 
+// Blizzard's hidden Direct3D/GX render window ("Warcraft III" class, created at 0x4cb390 and hooked via
+// GetWindowLongA(GWL_WNDPROC)+SetWindowLongA(0x4cab80) in CAIEditor / CCampaignEditor) has NO menu.
+// Putting a ComCtl32 master subclass on it makes Blizzard's CallWindowProcA(old) chain loop forever
+// (USER32!SendMessageWorker stack overflow, 0xC000041D). The real main frame of the same class owns a menu.
+static bool IsBlizzardGxWindowWithoutMenu(HWND hwnd, const wchar_t* cls) {
+    if (!hwnd || !cls || _wcsicmp(cls, L"Warcraft III") != 0) return false;
+    if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) != 0) return false;
+    return GetMenu(hwnd) == nullptr;
+}
+
 static void StyleWindowDark(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd) || gInStyleWindow || gShuttingDown)
         return;
@@ -1730,7 +1740,9 @@ static void StyleWindowDark(HWND hwnd) {
 
             if (!isChild) {
                 EnableDarkTitleBar(hwnd);
-                SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                if (!IsBlizzardGxWindowWithoutMenu(hwnd, cls)) {
+                    SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+                }
             } else {
                 // Ensure the parent container handles WM_CTLCOLOR* & NM_CUSTOMDRAW (even if parent class is 'Warcraft III'!)
                 // Skip SysTabControl32 and Delphi TESH VCL containers so we NEVER overwrite their GWL_WNDPROC!
@@ -1740,6 +1752,7 @@ static void StyleWindowDark(HWND hwnd) {
                     GetClassNameW(hParent, pCls, 96);
                     if (wcsstr(pCls, L"OpenGL") == nullptr &&
                         _wcsicmp(pCls, L"SysTabControl32") != 0 &&
+                        !IsBlizzardGxWindowWithoutMenu(hParent, pCls) &&
                         !IsDelphiOrTeshWindow(hParent, pCls))
                     {
                         SafeSetWindowSubclass(hParent, DarkContainerSubclassProc, kContainerSubclassId, 0);
@@ -2027,9 +2040,7 @@ static void StripOurSubclassesBeforeRehook(HWND hwnd) {
 static bool IsBlizzardDialogControlForRehook(HWND hwnd, LONG dwNewLong) {
     // Only Blizzard's COsControl dialog child controls (inside worldedit*.exe) overwrite
     // GWL_WNDPROC without chaining to the old WndProc (they jump straight to GCL_WNDPROC).
-    // NEVER strip & re-hook SysTabControl32 (AI Editor & Campaign Editor at 0x4cb0f3 save
-    // GetWindowLongA(GWL_WNDPROC) before SetWindowLongA and chain via CallWindowProc!),
-    // nor top-level/container windows or third-party JNGP plugin hooks (wehack/tesh/japi).
+    // NEVER strip & re-hook top-level/container windows or third-party JNGP plugin hooks (wehack/tesh/japi).
     LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
     if ((style & WS_CHILD) == 0) return false;
 
@@ -2221,14 +2232,80 @@ static BOOL CALLBACK WakeProcessWindowsProc(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
+static void InstallCrashDiag();
+
 extern "C" __declspec(dllexport) DWORD WINAPI InitializeDarkMode(LPVOID /*lpThreadId*/) {
     if (InterlockedExchange(&gInitialized, 1) != 0)
         return 1;
 
+    InstallCrashDiag();
     LoadPaletteAndBrushes();
     InitUxThemeAndDwm();
     EnumWindows(WakeProcessWindowsProc, static_cast<LPARAM>(GetCurrentProcessId()));
     return 1;
+}
+
+// ----------------------------------------------------------------------------
+// Crash breadcrumb: on stack overflow writes the return addresses found near ESP to
+// WE_DarkMode\crash_diag.txt (only when a crash actually happens; zero cost otherwise).
+// ----------------------------------------------------------------------------
+static wchar_t gDiagPath[MAX_PATH] = {};
+static PVOID   gVehHandle = nullptr;
+
+static void DiagWrite(HANDLE h, const char* text) {
+    DWORD n = 0;
+    WriteFile(h, text, static_cast<DWORD>(lstrlenA(text)), &n, nullptr);
+}
+
+static LONG CALLBACK CrashDiagVeh(PEXCEPTION_POINTERS ep) {
+    const DWORD code = ep->ExceptionRecord->ExceptionCode;
+    if (code != 0xC00000FDu && code != 0xC000041Du) return EXCEPTION_CONTINUE_SEARCH;
+    static volatile LONG sOnce = 0;
+    if (InterlockedExchange(&sOnce, 1) != 0) return EXCEPTION_CONTINUE_SEARCH;
+
+    HANDLE h = CreateFileW(gDiagPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return EXCEPTION_CONTINUE_SEARCH;
+
+    char line[160];
+    wsprintfA(line, "code=%08lX addr=%p esp=%p\r\n", code, ep->ExceptionRecord->ExceptionAddress,
+              reinterpret_cast<void*>(static_cast<uintptr_t>(ep->ContextRecord->Esp)));
+    DiagWrite(h, line);
+
+    const DWORD* sp = reinterpret_cast<const DWORD*>(static_cast<uintptr_t>(ep->ContextRecord->Esp));
+    int hits = 0;
+    for (int i = 0; i < 6000 && hits < 160; ++i) {
+        DWORD v = sp[i];
+        if (v < 0x10000u) continue;
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(static_cast<uintptr_t>(v - 8)), &mbi, sizeof(mbi)) != sizeof(mbi)) continue;
+        if (mbi.State != MEM_COMMIT) continue;
+        if ((mbi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) == 0) continue;
+        const BYTE* b = reinterpret_cast<const BYTE*>(static_cast<uintptr_t>(v));
+        if (b[-5] != 0xE8 && b[-6] != 0xFF && b[-2] != 0xFF && b[-3] != 0xFF) continue;
+        HMODULE hm = nullptr;
+        wchar_t name[MAX_PATH / 2] = {};
+        if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               reinterpret_cast<LPCWSTR>(static_cast<uintptr_t>(v)), &hm) && hm) {
+            GetModuleFileNameW(hm, name, MAX_PATH / 2);
+        }
+        const wchar_t* base = name[0] ? PathFindFileNameW(name) : L"?";
+        char nameA[64] = {};
+        WideCharToMultiByte(CP_ACP, 0, base, -1, nameA, 63, nullptr, nullptr);
+        wsprintfA(line, "[%03d] %s+0x%lX\r\n", i, nameA, static_cast<unsigned long>(v - static_cast<DWORD>(reinterpret_cast<uintptr_t>(hm))));
+        DiagWrite(h, line);
+        ++hits;
+    }
+    CloseHandle(h);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static void InstallCrashDiag() {
+    if (gVehHandle || !gSelfModule) return;
+    if (GetModuleFileNameW(gSelfModule, gDiagPath, MAX_PATH) == 0) return;
+    wchar_t* slash = wcsrchr(gDiagPath, L'\\');
+    if (!slash) return;
+    wcscpy(slash + 1, L"crash_diag.txt");
+    gVehHandle = AddVectoredExceptionHandler(1, CrashDiagVeh);
 }
 
 static void RestoreAllHotPatches() {
@@ -2274,6 +2351,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpRese
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         InterlockedExchange(&gShuttingDown, 1);
         RestoreAllHotPatches();
+        if (gVehHandle) {
+            RemoveVectoredExceptionHandler(gVehHandle);
+            gVehHandle = nullptr;
+        }
         if (tCbtHook) {
             UnhookWindowsHookEx(tCbtHook);
             tCbtHook = nullptr;

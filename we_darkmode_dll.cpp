@@ -196,6 +196,7 @@ static constexpr UINT_PTR kTabSubclassId       = 0x57454454;
 static constexpr UINT_PTR kButtonSubclassId    = 0x57454442;
 static constexpr UINT_PTR kUpDownSubclassId    = 0x57454455;
 static constexpr UINT_PTR kComboSubclassId     = 0x57454443;
+static constexpr UINT_PTR kStaticSubclassId    = 0x57454453;
 
 static thread_local bool gInThemeRedirect    = false;
 static thread_local bool gInStyleWindow      = false;
@@ -1358,6 +1359,41 @@ static LRESULT CALLBACK DarkTabSubclassProc(
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
+static LRESULT CALLBACK DarkStaticShapeSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    if (msg == WM_NCDESTROY) {
+        gInSubclassInternal = true;
+        RemoveWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId);
+        gInSubclassInternal = false;
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_PAINT) {
+        PAINTSTRUCT ps = {};
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc = {};
+        GetClientRect(hwnd, &rc);
+        DWORD st = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE) & SS_TYPEMASK);
+        if (st == SS_WHITERECT || st == SS_GRAYRECT || st == SS_BLACKRECT) {
+            RawFillRect(hdc, &rc, gBrushBg);
+            Draw1PxBorder(hdc, rc, gColBorder);
+        } else if (st == SS_ETCHEDHORZ) {
+            RECT rLine = { rc.left, rc.top, rc.right, rc.top + 1 };
+            RawFillRect(hdc, &rLine, gBrushBorder);
+        } else if (st == SS_ETCHEDVERT) {
+            RECT rLine = { rc.left, rc.top, rc.left + 1, rc.bottom };
+            RawFillRect(hdc, &rLine, gBrushBorder);
+        } else {
+            Draw1PxBorder(hdc, rc, gColBorder);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 static void StyleWindowDark(HWND hwnd);
 
 static BOOL CALLBACK EnumChildStyleProc(HWND child, LPARAM /*lParam*/) {
@@ -1414,6 +1450,16 @@ static void StyleWindowDark(HWND hwnd) {
             } else if (_wcsicmp(cls, L"ComboBox") == 0 || _wcsicmp(cls, L"ComboBoxEx32") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
                 SetWindowSubclass(hwnd, DarkComboBoxSubclassProc, kComboSubclassId, 0);
+                SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
+            } else if (_wcsicmp(cls, L"Static") == 0) {
+                DWORD st = static_cast<DWORD>(style & SS_TYPEMASK);
+                if (st == SS_WHITERECT || st == SS_GRAYRECT || st == SS_BLACKRECT ||
+                    st == SS_WHITEFRAME || st == SS_GRAYFRAME || st == SS_BLACKFRAME ||
+                    st == SS_ETCHEDFRAME || st == SS_ETCHEDHORZ || st == SS_ETCHEDVERT)
+                {
+                    SetWindowTheme(hwnd, L"", L"");
+                    SetWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId, 0);
+                }
                 SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"Button") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
@@ -1490,12 +1536,19 @@ static HBRUSH WINAPI DetourGetSysColorBrush(int nIndex) {
 }
 
 static int WINAPI DetourFillRect(HDC hDC, const RECT* lprc, HBRUSH hbr) {
-    if (!gInInternalDraw) {
+    if (!gInInternalDraw && hbr) {
         uintptr_t v = reinterpret_cast<uintptr_t>(hbr);
         if (v >= 1 && v <= 32) {
             int idx = static_cast<int>(v - 1);
             if (gSysColorOverride[idx] && gSysBrushes[idx]) {
                 hbr = gSysBrushes[idx];
+            }
+        } else {
+            LOGBRUSH lb = {};
+            if (GetObjectW(hbr, sizeof(lb), &lb) == sizeof(lb) && lb.lbStyle == BS_SOLID) {
+                if (GetRValue(lb.lbColor) > 215 && GetGValue(lb.lbColor) > 215 && GetBValue(lb.lbColor) > 215) {
+                    hbr = gBrushBg;
+                }
             }
         }
     }
@@ -1619,12 +1672,13 @@ static COLORREF WINAPI DetourSetTextColor(HDC hdc, COLORREF col) {
 }
 
 static void StripOurSubclassesBeforeRehook(HWND hwnd) {
-    RemoveWindowSubclass(hwnd, DarkButtonSubclassProc,    kButtonSubclassId);
-    RemoveWindowSubclass(hwnd, DarkComboBoxSubclassProc,  kComboSubclassId);
-    RemoveWindowSubclass(hwnd, DarkUpDownSubclassProc,    kUpDownSubclassId);
-    RemoveWindowSubclass(hwnd, DarkHeaderSubclassProc,    kHeaderSubclassId);
-    RemoveWindowSubclass(hwnd, DarkTabSubclassProc,       kTabSubclassId);
-    RemoveWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId);
+    RemoveWindowSubclass(hwnd, DarkButtonSubclassProc,      kButtonSubclassId);
+    RemoveWindowSubclass(hwnd, DarkComboBoxSubclassProc,    kComboSubclassId);
+    RemoveWindowSubclass(hwnd, DarkUpDownSubclassProc,      kUpDownSubclassId);
+    RemoveWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId);
+    RemoveWindowSubclass(hwnd, DarkHeaderSubclassProc,      kHeaderSubclassId);
+    RemoveWindowSubclass(hwnd, DarkTabSubclassProc,         kTabSubclassId);
+    RemoveWindowSubclass(hwnd, DarkContainerSubclassProc,   kContainerSubclassId);
 }
 
 static LONG WINAPI DetourSetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong) {

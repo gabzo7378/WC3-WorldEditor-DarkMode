@@ -1,4 +1,4 @@
-﻿$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Stop"
 $gpp = "C:\msys64\mingw32\bin\g++.exe"
 if (-not (Test-Path $gpp)) {
     throw "No se encontró el compilador 32-bit en $gpp"

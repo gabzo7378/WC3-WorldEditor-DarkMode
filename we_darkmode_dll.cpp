@@ -123,10 +123,14 @@ using fnGetSysColor                = DWORD(WINAPI*)(int);
 using fnGetSysColorBrush           = HBRUSH(WINAPI*)(int);
 using fnFillRect                   = int(WINAPI*)(HDC, const RECT*, HBRUSH);
 using fnDrawEdge                   = BOOL(WINAPI*)(HDC, LPRECT, UINT, UINT);
+using fnSetWindowLongA             = LONG(WINAPI*)(HWND, int, LONG);
+using fnSetWindowLongW             = LONG(WINAPI*)(HWND, int, LONG);
 using fnCreateWindowExA            = HWND(WINAPI*)(DWORD, LPCSTR, LPCSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
 using fnCreateWindowExW            = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
 using fnCreateDialogIndirectParamA = HWND(WINAPI*)(HINSTANCE, LPCDLGTEMPLATEA, HWND, DLGPROC, LPARAM);
 using fnCreateDialogIndirectParamW = HWND(WINAPI*)(HINSTANCE, LPCDLGTEMPLATEW, HWND, DLGPROC, LPARAM);
+using fnFillRgn                    = BOOL(WINAPI*)(HDC, HRGN, HBRUSH);
+using fnSetTextColor               = COLORREF(WINAPI*)(HDC, COLORREF);
 using fnOpenThemeData              = HTHEME(WINAPI*)(HWND, LPCWSTR);
 using fnOpenThemeDataEx            = HTHEME(WINAPI*)(HWND, LPCWSTR, DWORD);
 using fnGetThemeSysColor           = COLORREF(WINAPI*)(HTHEME, int);
@@ -136,10 +140,14 @@ static HotPatchSlot gHpGetSysColor;
 static HotPatchSlot gHpGetSysColorBrush;
 static HotPatchSlot gHpFillRect;
 static HotPatchSlot gHpDrawEdge;
+static HotPatchSlot gHpSetWindowLongA;
+static HotPatchSlot gHpSetWindowLongW;
 static HotPatchSlot gHpCreateWindowExA;
 static HotPatchSlot gHpCreateWindowExW;
 static HotPatchSlot gHpCreateDialogIndirectParamA;
 static HotPatchSlot gHpCreateDialogIndirectParamW;
+static HotPatchSlot gHpFillRgn;
+static HotPatchSlot gHpSetTextColor;
 static HotPatchSlot gHpOpenThemeData;
 static HotPatchSlot gHpOpenThemeDataEx;
 static HotPatchSlot gHpGetThemeSysColor;
@@ -187,10 +195,12 @@ static constexpr UINT_PTR kHeaderSubclassId    = 0x57454448;
 static constexpr UINT_PTR kTabSubclassId       = 0x57454454;
 static constexpr UINT_PTR kButtonSubclassId    = 0x57454442;
 static constexpr UINT_PTR kUpDownSubclassId    = 0x57454455;
+static constexpr UINT_PTR kComboSubclassId     = 0x57454443;
 
-static thread_local bool gInThemeRedirect = false;
-static thread_local bool gInStyleWindow   = false;
-static thread_local bool gInInternalDraw  = false;
+static thread_local bool gInThemeRedirect    = false;
+static thread_local bool gInStyleWindow      = false;
+static thread_local bool gInInternalDraw     = false;
+static thread_local bool gInSubclassInternal = false;
 
 // ============================================================================
 // INI & Palette Loader
@@ -680,7 +690,9 @@ static LRESULT CALLBACK DarkButtonSubclassProc(
 {
     if (msg == WM_NCDESTROY) {
         if (gHoveredCtrl == hwnd) gHoveredCtrl = nullptr;
+        gInSubclassInternal = true;
         RemoveWindowSubclass(hwnd, DarkButtonSubclassProc, kButtonSubclassId);
+        gInSubclassInternal = false;
         return DefSubclassProc(hwnd, msg, wParam, lParam);
     }
 
@@ -944,9 +956,115 @@ static LRESULT CALLBACK DarkUpDownSubclassProc(
     }
 
     if (msg == WM_NCDESTROY) {
+        gInSubclassInternal = true;
         RemoveWindowSubclass(hwnd, DarkUpDownSubclassProc, kUpDownSubclassId);
+        gInSubclassInternal = false;
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static LRESULT CALLBACK DarkComboBoxSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    switch (msg) {
+        case WM_MOUSEMOVE: {
+            if (gHoveredCtrl != hwnd) {
+                HWND prev = gHoveredCtrl;
+                gHoveredCtrl = hwnd;
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                InvalidateRect(hwnd, nullptr, FALSE);
+                if (prev && IsWindow(prev)) InvalidateRect(prev, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE: {
+            if (gHoveredCtrl == hwnd) {
+                gHoveredCtrl = nullptr;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_SETFOCUS:
+        case WM_KILLFOCUS:
+        case WM_ENABLE: {
+            LRESULT r = DefSubclassProc(hwnd, msg, wParam, lParam);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return r;
+        }
+        case WM_PAINT: {
+            LRESULT r = DefSubclassProc(hwnd, msg, wParam, lParam);
+            HDC hdc = GetDC(hwnd);
+            if (hdc) {
+                RECT rc = {};
+                GetClientRect(hwnd, &rc);
+                COMBOBOXINFO cbi = {};
+                cbi.cbSize = sizeof(cbi);
+                bool hasCbi = GetComboBoxInfo(hwnd, &cbi) != FALSE;
+
+                bool disabled = !IsWindowEnabled(hwnd);
+                bool pressed  = hasCbi && (cbi.stateButton == STATE_SYSTEM_PRESSED);
+                bool focused  = (GetFocus() == hwnd) || (hasCbi && cbi.hwndItem && GetFocus() == cbi.hwndItem) || pressed;
+
+                RECT rcInner = { rc.left + 1, rc.top + 1, rc.right - 1, rc.bottom - 1 };
+                Draw1PxBorder(hdc, rcInner, gColInput);
+                Draw1PxBorder(hdc, rc, focused ? RGB(0x3A, 0x72, 0xA8) : gColBorder);
+
+                if (hasCbi && (cbi.stateButton & STATE_SYSTEM_INVISIBLE) == 0 && cbi.rcButton.right > cbi.rcButton.left) {
+                    RECT rcBtn = { cbi.rcButton.left - 1, rc.top + 1, rc.right - 1, rc.bottom - 1 };
+                    HBRUSH btnBr = gBrushButton;
+                    if (!disabled) {
+                        if (pressed) btnBr = gBrushAccent;
+                        else if (gHoveredCtrl == hwnd) btnBr = gBrushHover;
+                    }
+                    RawFillRect(hdc, &rcBtn, btnBr);
+
+                    RECT rSep = { rcBtn.left, rcBtn.top, rcBtn.left + 1, rcBtn.bottom };
+                    RawFillRect(hdc, &rSep, gBrushBorder);
+
+                    int cx = (rcBtn.left + 1 + rcBtn.right) / 2;
+                    int cy = (rcBtn.top + rcBtn.bottom) / 2;
+                    COLORREF arrCol = disabled ? gColMutedText : gColText;
+                    POINT pts[3] = { { cx - 3, cy - 1 }, { cx + 3, cy - 1 }, { cx, cy + 2 } };
+                    HBRUSH aBr = CreateSolidBrush(arrCol);
+                    HPEN aPen  = CreatePen(PS_SOLID, 1, arrCol);
+                    HGDIOBJ oB = SelectObject(hdc, aBr);
+                    HGDIOBJ oP = SelectObject(hdc, aPen);
+                    Polygon(hdc, pts, 3);
+                    SelectObject(hdc, oB);
+                    SelectObject(hdc, oP);
+                    DeleteObject(aBr);
+                    DeleteObject(aPen);
+                }
+
+                ReleaseDC(hwnd, hdc);
+            }
+            return r;
+        }
+        case WM_NCDESTROY:
+            if (gHoveredCtrl == hwnd) gHoveredCtrl = nullptr;
+            gInSubclassInternal = true;
+            RemoveWindowSubclass(hwnd, DarkComboBoxSubclassProc, kComboSubclassId);
+            gInSubclassInternal = false;
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static bool IsWin32MessageBox(HWND hwnd) {
+    wchar_t cls[16] = {};
+    if (GetClassNameW(hwnd, cls, 16) <= 0 || wcscmp(cls, L"#32770") != 0)
+        return false;
+    if (GetDlgItem(hwnd, 0xFFFF) == nullptr)
+        return false;
+    for (int id = 1; id <= 11; ++id) {
+        if (GetDlgItem(hwnd, id) != nullptr) return true;
+    }
+    return false;
 }
 
 // ============================================================================
@@ -962,6 +1080,53 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
     }
 
     switch (msg) {
+        case WM_PAINT: {
+            if (IsWin32MessageBox(hwnd)) {
+                PAINTSTRUCT ps = {};
+                HDC hdc = BeginPaint(hwnd, &ps);
+                RECT rc = {};
+                GetClientRect(hwnd, &rc);
+
+                int minBtnTop = rc.bottom;
+                for (int id = 1; id <= 11; ++id) {
+                    HWND hBtn = GetDlgItem(hwnd, id);
+                    if (hBtn && IsWindowVisible(hBtn)) {
+                        RECT rb = {};
+                        GetWindowRect(hBtn, &rb);
+                        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<LPPOINT>(&rb), 2);
+                        if (rb.top < minBtnTop) minBtnTop = rb.top;
+                    }
+                }
+
+                int saved = SaveDC(hdc);
+                for (HWND ch = GetWindow(hwnd, GW_CHILD); ch != nullptr; ch = GetWindow(ch, GW_HWNDNEXT)) {
+                    if (IsWindowVisible(ch)) {
+                        RECT rcCh = {};
+                        GetWindowRect(ch, &rcCh);
+                        MapWindowPoints(HWND_DESKTOP, hwnd, reinterpret_cast<LPPOINT>(&rcCh), 2);
+                        ExcludeClipRect(hdc, rcCh.left, rcCh.top, rcCh.right, rcCh.bottom);
+                    }
+                }
+
+                if (minBtnTop < rc.bottom && minBtnTop > 12) {
+                    int sepY = minBtnTop - 10;
+                    RECT rcTop = { rc.left, rc.top, rc.right, sepY };
+                    RECT rcSep = { rc.left, sepY, rc.right, sepY + 1 };
+                    RECT rcBot = { rc.left, sepY + 1, rc.right, rc.bottom };
+                    RawFillRect(hdc, &rcTop, gBrushBg);
+                    RawFillRect(hdc, &rcSep, gBrushBorder);
+                    RawFillRect(hdc, &rcBot, gBrushSurface);
+                } else {
+                    RawFillRect(hdc, &rc, gBrushBg);
+                }
+
+                RestoreDC(hdc, saved);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+            break;
+        }
+
         case WM_ERASEBKGND: {
             if ((GetWindowLongPtrW(hwnd, GWL_STYLE) & WS_CHILD) == 0) {
                 HDC hdc = reinterpret_cast<HDC>(wParam);
@@ -1146,7 +1311,9 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
         }
 
         case WM_NCDESTROY:
+            gInSubclassInternal = true;
             RemoveWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId);
+            gInSubclassInternal = false;
             break;
     }
 
@@ -1165,7 +1332,9 @@ static LRESULT CALLBACK DarkHeaderSubclassProc(
         return 1;
     }
     if (msg == WM_NCDESTROY) {
+        gInSubclassInternal = true;
         RemoveWindowSubclass(hwnd, DarkHeaderSubclassProc, kHeaderSubclassId);
+        gInSubclassInternal = false;
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
@@ -1182,7 +1351,9 @@ static LRESULT CALLBACK DarkTabSubclassProc(
         return 1;
     }
     if (msg == WM_NCDESTROY) {
+        gInSubclassInternal = true;
         RemoveWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId);
+        gInSubclassInternal = false;
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
@@ -1241,7 +1412,8 @@ static void StyleWindowDark(HWND hwnd) {
                 SetWindowTheme(hwnd, L"", L"");
                 SetWindowSubclass(hwnd, DarkHeaderSubclassProc, kHeaderSubclassId, 0);
             } else if (_wcsicmp(cls, L"ComboBox") == 0 || _wcsicmp(cls, L"ComboBoxEx32") == 0) {
-                SetWindowTheme(hwnd, L"DarkMode_CFD", nullptr);
+                SetWindowTheme(hwnd, L"", L"");
+                SetWindowSubclass(hwnd, DarkComboBoxSubclassProc, kComboSubclassId, 0);
                 SetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"Button") == 0) {
                 SetWindowTheme(hwnd, L"", L"");
@@ -1415,13 +1587,70 @@ static LPCWSTR MapClassListToDark(HWND /*hwnd*/, LPCWSTR pszClassList, bool& for
         _wcsicmp(pszClassList, L"Trackbar") == 0 ||
         _wcsicmp(pszClassList, L"Spin") == 0 ||
         _wcsicmp(pszClassList, L"Progress") == 0 ||
-        _wcsicmp(pszClassList, L"Tooltip") == 0)
+        _wcsicmp(pszClassList, L"Tooltip") == 0 ||
+        _wcsicmp(pszClassList, L"TaskDialog") == 0 ||
+        _wcsicmp(pszClassList, L"TaskDialogStyle") == 0 ||
+        _wcsicmp(pszClassList, L"AeroWizard") == 0)
     {
         forceClassicNull = true;
         return nullptr;
     }
 
     return pszClassList;
+}
+
+static BOOL WINAPI DetourFillRgn(HDC hdc, HRGN hrgn, HBRUSH hbr) {
+    if (!gInInternalDraw && hbr) {
+        LOGBRUSH lb = {};
+        if (GetObjectW(hbr, sizeof(lb), &lb) == sizeof(lb) && lb.lbStyle == BS_SOLID) {
+            if (GetRValue(lb.lbColor) > 215 && GetGValue(lb.lbColor) > 215 && GetBValue(lb.lbColor) > 215) {
+                hbr = gBrushBg;
+            }
+        }
+    }
+    return reinterpret_cast<fnFillRgn>(gHpFillRgn.origEntry)(hdc, hrgn, hbr);
+}
+
+static COLORREF WINAPI DetourSetTextColor(HDC hdc, COLORREF col) {
+    if (!gInInternalDraw) {
+        col = LiftColorForDarkBg(col);
+    }
+    return reinterpret_cast<fnSetTextColor>(gHpSetTextColor.origEntry)(hdc, col);
+}
+
+static void StripOurSubclassesBeforeRehook(HWND hwnd) {
+    RemoveWindowSubclass(hwnd, DarkButtonSubclassProc,    kButtonSubclassId);
+    RemoveWindowSubclass(hwnd, DarkComboBoxSubclassProc,  kComboSubclassId);
+    RemoveWindowSubclass(hwnd, DarkUpDownSubclassProc,    kUpDownSubclassId);
+    RemoveWindowSubclass(hwnd, DarkHeaderSubclassProc,    kHeaderSubclassId);
+    RemoveWindowSubclass(hwnd, DarkTabSubclassProc,       kTabSubclassId);
+    RemoveWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId);
+}
+
+static LONG WINAPI DetourSetWindowLongA(HWND hWnd, int nIndex, LONG dwNewLong) {
+    auto orig = reinterpret_cast<fnSetWindowLongA>(gHpSetWindowLongA.origEntry);
+    if (nIndex == GWL_WNDPROC && !gInStyleWindow && !gInSubclassInternal && hWnd && IsWindow(hWnd)) {
+        gInSubclassInternal = true;
+        StripOurSubclassesBeforeRehook(hWnd);
+        LONG ret = orig(hWnd, nIndex, dwNewLong);
+        StyleWindowDark(hWnd);
+        gInSubclassInternal = false;
+        return ret;
+    }
+    return orig(hWnd, nIndex, dwNewLong);
+}
+
+static LONG WINAPI DetourSetWindowLongW(HWND hWnd, int nIndex, LONG dwNewLong) {
+    auto orig = reinterpret_cast<fnSetWindowLongW>(gHpSetWindowLongW.origEntry);
+    if (nIndex == GWL_WNDPROC && !gInStyleWindow && !gInSubclassInternal && hWnd && IsWindow(hWnd)) {
+        gInSubclassInternal = true;
+        StripOurSubclassesBeforeRehook(hWnd);
+        LONG ret = orig(hWnd, nIndex, dwNewLong);
+        StyleWindowDark(hWnd);
+        gInSubclassInternal = false;
+        return ret;
+    }
+    return orig(hWnd, nIndex, dwNewLong);
 }
 
 static HTHEME WINAPI DetourOpenThemeData(HWND hwnd, LPCWSTR pszClassList) {
@@ -1532,12 +1761,20 @@ static void InitUxThemeAndDwm() {
         gDwmSetWindowAttribute = reinterpret_cast<fnDwmSetWindowAttribute>(GetProcAddress(hDwm, "DwmSetWindowAttribute"));
     }
 
+    HMODULE hGdi = LoadLibraryW(L"gdi32.dll");
+    if (hGdi) {
+        InstallHotPatch(hGdi, "FillRgn",      reinterpret_cast<void*>(&DetourFillRgn),      gHpFillRgn);
+        InstallHotPatch(hGdi, "SetTextColor", reinterpret_cast<void*>(&DetourSetTextColor), gHpSetTextColor);
+    }
+
     HMODULE hUser = LoadLibraryW(L"user32.dll");
     if (hUser) {
         InstallHotPatch(hUser, "GetSysColor",                reinterpret_cast<void*>(&DetourGetSysColor),                gHpGetSysColor);
         InstallHotPatch(hUser, "GetSysColorBrush",           reinterpret_cast<void*>(&DetourGetSysColorBrush),           gHpGetSysColorBrush);
         InstallHotPatch(hUser, "FillRect",                   reinterpret_cast<void*>(&DetourFillRect),                   gHpFillRect);
         InstallHotPatch(hUser, "DrawEdge",                   reinterpret_cast<void*>(&DetourDrawEdge),                   gHpDrawEdge);
+        InstallHotPatch(hUser, "SetWindowLongA",             reinterpret_cast<void*>(&DetourSetWindowLongA),             gHpSetWindowLongA);
+        InstallHotPatch(hUser, "SetWindowLongW",             reinterpret_cast<void*>(&DetourSetWindowLongW),             gHpSetWindowLongW);
         InstallHotPatch(hUser, "CreateWindowExA",            reinterpret_cast<void*>(&DetourCreateWindowExA),            gHpCreateWindowExA);
         InstallHotPatch(hUser, "CreateWindowExW",            reinterpret_cast<void*>(&DetourCreateWindowExW),            gHpCreateWindowExW);
         InstallHotPatch(hUser, "CreateDialogIndirectParamA", reinterpret_cast<void*>(&DetourCreateDialogIndirectParamA), gHpCreateDialogIndirectParamA);

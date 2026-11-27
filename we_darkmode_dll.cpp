@@ -225,6 +225,35 @@ struct ActiveMsgFrame { HWND h; UINT m; UINT_PTR id; };
 static thread_local ActiveMsgFrame tContainerActive[32] = {};
 static thread_local int            tContainerDepth      = 0;
 
+static wchar_t gGuardPath[MAX_PATH] = {};
+static volatile LONG gGuardLogCount = 0;
+
+// Records (up to 24 times) the window/message that tripped a re-entrancy guard -> WE_DarkMode\guard_diag.txt
+static void LogGuardHit(const char* tag, HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    if (!gGuardPath[0] || InterlockedIncrement(&gGuardLogCount) > 24) return;
+    HANDLE h = CreateFileW(gGuardPath, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    wchar_t cls[64] = {}, pcls[64] = {};
+    GetClassNameW(hwnd, cls, 64);
+    HWND par = GetParent(hwnd);
+    if (par) GetClassNameW(par, pcls, 64);
+    char ca[64] = {}, pa[64] = {};
+    WideCharToMultiByte(CP_ACP, 0, cls, -1, ca, 63, nullptr, nullptr);
+    WideCharToMultiByte(CP_ACP, 0, pcls, -1, pa, 63, nullptr, nullptr);
+    char line[360];
+    wsprintfA(line, "%s hwnd=%p class='%s' parent=%p '%s' style=%08lX msg=0x%04X wp=%p lp=%p depth=%d active:",
+              tag, hwnd, ca, par, pa, static_cast<unsigned long>(GetWindowLongPtrW(hwnd, GWL_STYLE)),
+              msg, reinterpret_cast<void*>(wParam), reinterpret_cast<void*>(lParam), tContainerDepth);
+    DWORD n = 0;
+    WriteFile(h, line, lstrlenA(line), &n, nullptr);
+    for (int i = 0; i < tContainerDepth && i < 12; ++i) {
+        wsprintfA(line, " %p/0x%04X", tContainerActive[i].h, tContainerActive[i].m);
+        WriteFile(h, line, lstrlenA(line), &n, nullptr);
+    }
+    WriteFile(h, "\r\n", 2, &n, nullptr);
+    CloseHandle(h);
+}
+
 using fnGetWindowSubclass = BOOL(WINAPI*)(HWND, SUBCLASSPROC, UINT_PTR, DWORD_PTR*);
 
 static BOOL SafeQueryWindowSubclass(HWND hwnd, SUBCLASSPROC pfn, UINT_PTR uId, DWORD_PTR* pRef) {
@@ -1138,11 +1167,13 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
     }
     // Hard re-entrancy & depth guard: makes stack overflow (0xC000041D / 0xC00000FD) impossible
     if (tContainerDepth >= 28) {
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
+        LogGuardHit("depth-c", hwnd, msg, wParam, lParam);
+        return 0;
     }
     for (int i = 0; i < tContainerDepth; ++i) {
         if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg && tContainerActive[i].id == kContainerSubclassId) {
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            LogGuardHit("reenter-c", hwnd, msg, wParam, lParam);
+        return 0;
         }
     }
     struct ScopePop {
@@ -1433,11 +1464,13 @@ static LRESULT CALLBACK DarkTabSubclassProc(
         return DefSubclassProc(hwnd, msg, wParam, lParam);
     }
     if (tContainerDepth >= 28) {
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
+        LogGuardHit("depth-t", hwnd, msg, wParam, lParam);
+        return 0;
     }
     for (int i = 0; i < tContainerDepth; ++i) {
         if (tContainerActive[i].h == hwnd && tContainerActive[i].m == msg && tContainerActive[i].id == kTabSubclassId) {
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
+            LogGuardHit("reenter-t", hwnd, msg, wParam, lParam);
+        return 0;
         }
     }
     struct TabPop {
@@ -2305,6 +2338,8 @@ static void InstallCrashDiag() {
     wchar_t* slash = wcsrchr(gDiagPath, L'\\');
     if (!slash) return;
     wcscpy(slash + 1, L"crash_diag.txt");
+    wcscpy(gGuardPath, gDiagPath);
+    wcscpy(wcsrchr(gGuardPath, L'\\') + 1, L"guard_diag.txt");
     gVehHandle = AddVectoredExceptionHandler(1, CrashDiagVeh);
 }
 

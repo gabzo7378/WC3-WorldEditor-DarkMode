@@ -1691,6 +1691,31 @@ static BOOL CALLBACK EnumChildStyleProc(HWND child, LPARAM /*lParam*/) {
     return TRUE;
 }
 
+static bool IsDelphiOrTeshWindow(HWND hwnd, const wchar_t* cls) {
+    // Delphi 7 VCL (TESH 0.7 in JNGP 1.4g) uses MakeObjectInstance heap thunks on GWL_WNDPROC
+    // and frees GetWindowLongA(GWL_WNDPROC) directly via FreeObjectInstance on exit!
+    // Subclassing a Delphi VCL window with Unicode SetWindowSubclass turns GetWindowLongA into a
+    // 0xFFFFxxxx WOW64 handle cookie, causing EAccessViolation (Write of FFFF09F0) on close.
+    // Note: "Scintilla" is owned by SciLexer.dll/Scintilla.dll (NOT tesh.dll), so it still gets full dark mode!
+    if (cls && (_wcsicmp(cls, L"TPUtilWindow") == 0 ||
+                _wcsicmp(cls, L"TApplication") == 0 ||
+                _wcsnicmp(cls, L"TTesh", 5) == 0 ||
+                _wcsnicmp(cls, L"TForm", 5) == 0))
+    {
+        return true;
+    }
+    if (hwnd) {
+        HMODULE hTesh = GetModuleHandleW(L"tesh.dll");
+        if (hTesh) {
+            HINSTANCE hInst = reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(hwnd, GWLP_HINSTANCE));
+            if (hInst == hTesh) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static void StyleWindowDark(HWND hwnd) {
     if (!hwnd || !IsWindow(hwnd) || gInStyleWindow || gShuttingDown)
         return;
@@ -1699,7 +1724,7 @@ static void StyleWindowDark(HWND hwnd) {
 
     wchar_t cls[96] = {};
     if (GetClassNameW(hwnd, cls, 96) > 0) {
-        if (wcsstr(cls, L"OpenGL") == nullptr) {
+        if (wcsstr(cls, L"OpenGL") == nullptr && !IsDelphiOrTeshWindow(hwnd, cls)) {
             LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
             bool isChild = (style & WS_CHILD) != 0;
 
@@ -1708,12 +1733,15 @@ static void StyleWindowDark(HWND hwnd) {
                 SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else {
                 // Ensure the parent container handles WM_CTLCOLOR* & NM_CUSTOMDRAW (even if parent class is 'Warcraft III'!)
-                // Skip SysTabControl32 so we NEVER re-attach ComCtl32 MasterSubclassProc on top of Blizzard's 0x4cab80 TabProc!
+                // Skip SysTabControl32 and Delphi TESH VCL containers so we NEVER overwrite their GWL_WNDPROC!
                 HWND hParent = GetParent(hwnd);
                 if (hParent && IsWindow(hParent)) {
                     wchar_t pCls[96] = {};
                     GetClassNameW(hParent, pCls, 96);
-                    if (wcsstr(pCls, L"OpenGL") == nullptr && _wcsicmp(pCls, L"SysTabControl32") != 0) {
+                    if (wcsstr(pCls, L"OpenGL") == nullptr &&
+                        _wcsicmp(pCls, L"SysTabControl32") != 0 &&
+                        !IsDelphiOrTeshWindow(hParent, pCls))
+                    {
                         SafeSetWindowSubclass(hParent, DarkContainerSubclassProc, kContainerSubclassId, 0);
                     }
                 }
@@ -2223,16 +2251,8 @@ static void RestoreAllHotPatches() {
 }
 
 static DWORD WINAPI JngpInitThreadProc(LPVOID /*unused*/) {
-    // Let Grimoire's weload.dll finish loading tesh.dll FIRST so TESH 0.7 / 2.0 hooks
-    // untouched user32.dll cleanly and our hot-patches never collide with TESH's unhook on exit.
-    DWORD start = GetTickCount();
-    while (GetTickCount() - start < 450 && !gShuttingDown) {
-        if (GetModuleHandleW(L"tesh.dll") != nullptr) {
-            Sleep(40);
-            break;
-        }
-        Sleep(15);
-    }
+    // Initialize immediately right after LoadLibrary (before weload.dll loads tesh.dll),
+    // avoiding any mid-initialization window-message race with TESH 0.7's gTeshForm!
     if (gShuttingDown) return 0;
     return InitializeDarkMode(nullptr);
 }

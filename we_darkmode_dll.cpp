@@ -119,6 +119,21 @@ static bool InstallHotPatch(HMODULE mod, const char* funcName, void* detour, Hot
     return true;
 }
 
+static void RestoreHotPatch(HotPatchSlot& slot) {
+    if (!slot.target) return;
+    uint8_t* p = slot.target;
+    if (p[0] == 0xEB && p[1] == 0xF9) {
+        DWORD oldProt = 0;
+        if (VirtualProtect(p, 2, PAGE_EXECUTE_READWRITE, &oldProt)) {
+            uint16_t origMov = 0xFF8B; // mov edi, edi (8B FF)
+            __atomic_store_n(reinterpret_cast<uint16_t*>(p), origMov, __ATOMIC_SEQ_CST);
+            FlushInstructionCache(GetCurrentProcess(), p, 2);
+            VirtualProtect(p, 2, oldProt, &oldProt);
+        }
+    }
+    slot.target = nullptr;
+}
+
 using fnGetSysColor                = DWORD(WINAPI*)(int);
 using fnGetSysColorBrush           = HBRUSH(WINAPI*)(int);
 using fnFillRect                   = int(WINAPI*)(HDC, const RECT*, HBRUSH);
@@ -158,6 +173,7 @@ static HotPatchSlot gHpGetThemeSysColorBrush;
 // ============================================================================
 static HMODULE gSelfModule = nullptr;
 static volatile LONG gInitialized = 0;
+static volatile LONG gShuttingDown = 0;
 static thread_local HHOOK tCbtHook = nullptr;
 static HWND gHoveredCtrl = nullptr;
 
@@ -1620,7 +1636,7 @@ static BOOL CALLBACK EnumChildStyleProc(HWND child, LPARAM /*lParam*/) {
 }
 
 static void StyleWindowDark(HWND hwnd) {
-    if (!hwnd || !IsWindow(hwnd) || gInStyleWindow)
+    if (!hwnd || !IsWindow(hwnd) || gInStyleWindow || gShuttingDown)
         return;
 
     gInStyleWindow = true;
@@ -2131,6 +2147,40 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeDarkMode(LPVOID /*lpThre
     return 1;
 }
 
+static void RestoreAllHotPatches() {
+    RestoreHotPatch(gHpCreateDialogIndirectParamW);
+    RestoreHotPatch(gHpCreateDialogIndirectParamA);
+    RestoreHotPatch(gHpCreateWindowExW);
+    RestoreHotPatch(gHpCreateWindowExA);
+    RestoreHotPatch(gHpSetWindowLongW);
+    RestoreHotPatch(gHpSetWindowLongA);
+    RestoreHotPatch(gHpDrawEdge);
+    RestoreHotPatch(gHpFillRect);
+    RestoreHotPatch(gHpGetSysColorBrush);
+    RestoreHotPatch(gHpGetSysColor);
+    RestoreHotPatch(gHpSetTextColor);
+    RestoreHotPatch(gHpFillRgn);
+    RestoreHotPatch(gHpGetThemeSysColorBrush);
+    RestoreHotPatch(gHpGetThemeSysColor);
+    RestoreHotPatch(gHpOpenThemeDataEx);
+    RestoreHotPatch(gHpOpenThemeData);
+}
+
+static DWORD WINAPI JngpInitThreadProc(LPVOID /*unused*/) {
+    // Let Grimoire's weload.dll finish loading tesh.dll FIRST so TESH 0.7 / 2.0 hooks
+    // untouched user32.dll cleanly and our hot-patches never collide with TESH's unhook on exit.
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < 450 && !gShuttingDown) {
+        if (GetModuleHandleW(L"tesh.dll") != nullptr) {
+            Sleep(40);
+            break;
+        }
+        Sleep(15);
+    }
+    if (gShuttingDown) return 0;
+    return InitializeDarkMode(nullptr);
+}
+
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpReserved*/) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         gSelfModule = hModule;
@@ -2141,11 +2191,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID /*lpRese
         if (GetModuleFileNameW(hModule, modPath, MAX_PATH) > 0) {
             const wchar_t* base = PathFindFileNameW(modPath);
             if (base && (wcsstr(base, L"JNGP") != nullptr || wcsstr(base, L"jngp") != nullptr)) {
-                HANDLE hThread = CreateThread(nullptr, 0, InitializeDarkMode, nullptr, 0, nullptr);
+                HANDLE hThread = CreateThread(nullptr, 0, JngpInitThreadProc, nullptr, 0, nullptr);
                 if (hThread) CloseHandle(hThread);
             }
         }
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+        InterlockedExchange(&gShuttingDown, 1);
+        RestoreAllHotPatches();
         if (tCbtHook) {
             UnhookWindowsHookEx(tCbtHook);
             tCbtHook = nullptr;

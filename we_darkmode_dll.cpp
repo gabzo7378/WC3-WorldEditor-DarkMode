@@ -214,6 +214,7 @@ static constexpr UINT_PTR kUpDownSubclassId    = 0x57454455;
 static constexpr UINT_PTR kComboSubclassId     = 0x57454443;
 static constexpr UINT_PTR kStaticSubclassId    = 0x57454453;
 static constexpr UINT_PTR kScintillaSubclassId = 0x5745444A;
+static constexpr UINT_PTR kScrollBarSubclassId = 0x5745444C;
 
 static thread_local bool gInThemeRedirect    = false;
 static thread_local bool gInStyleWindow      = false;
@@ -1051,6 +1052,151 @@ static LRESULT CALLBACK DarkUpDownSubclassProc(
     return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
+static LRESULT CALLBACK DarkScrollBarSubclassProc(
+    HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+    UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
+{
+    if (gShuttingDown) {
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+
+    switch (msg) {
+        case WM_MOUSEMOVE: {
+            if (gHoveredCtrl != hwnd) {
+                HWND prev = gHoveredCtrl;
+                gHoveredCtrl = hwnd;
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                if (prev && IsWindow(prev)) InvalidateRect(prev, nullptr, FALSE);
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE:
+            if (gHoveredCtrl == hwnd) gHoveredCtrl = nullptr;
+            InvalidateRect(hwnd, nullptr, FALSE);
+            break;
+
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps = {};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc = {};
+            GetClientRect(hwnd, &rc);
+            int w = rc.right - rc.left;
+            int h = rc.bottom - rc.top;
+
+            DWORD st = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE));
+            if ((st & (SBS_SIZEBOX | SBS_SIZEGRIP)) != 0) {
+                RawFillRect(hdc, &rc, gBrushBg);
+                EndPaint(hwnd, &ps);
+                return 0;
+            }
+
+            bool isVert   = (st & SBS_VERT) != 0;
+            bool disabled = !IsWindowEnabled(hwnd);
+            bool hovered  = (gHoveredCtrl == hwnd);
+
+            // Dark track (#121212) for strong contrast with the draggable thumb
+            RawFillRect(hdc, &rc, gBrushInput);
+
+            SCROLLBARINFO sbi = {};
+            sbi.cbSize = sizeof(sbi);
+            bool hasInfo = (GetScrollBarInfo(hwnd, OBJID_CLIENT, &sbi) != FALSE);
+            bool unavailable = disabled || (hasInfo && ((sbi.rgstate[0] & (STATE_SYSTEM_UNAVAILABLE | STATE_SYSTEM_INVISIBLE)) != 0));
+
+            int trackLen = isVert ? h : w;
+            int btnSz = (hasInfo && sbi.dxyLineButton > 0) ? sbi.dxyLineButton : (isVert ? w : h);
+            if (btnSz * 2 > trackLen) btnSz = trackLen / 2;
+
+            // Arrow buttons
+            RECT rcBtn1 = isVert ? RECT{ 0, 0, w, btnSz } : RECT{ 0, 0, btnSz, h };
+            RECT rcBtn2 = isVert ? RECT{ 0, h - btnSz, w, h } : RECT{ w - btnSz, 0, w, h };
+            HBRUSH btnBr = hovered ? gBrushHover : gBrushSurface;
+            RawFillRect(hdc, &rcBtn1, btnBr);
+            RawFillRect(hdc, &rcBtn2, btnBr);
+
+            COLORREF arrCol = unavailable ? gColMutedText : gColText;
+            HBRUSH arrBr = CreateSolidBrush(arrCol);
+            HPEN arrPen  = CreatePen(PS_SOLID, 1, arrCol);
+            HGDIOBJ oB = SelectObject(hdc, arrBr);
+            HGDIOBJ oP = SelectObject(hdc, arrPen);
+
+            if (isVert) {
+                int cx = w / 2;
+                int y1 = btnSz / 2;
+                int y2 = h - btnSz + btnSz / 2;
+                POINT pU[3] = { { cx - 3, y1 + 1 }, { cx, y1 - 2 }, { cx + 3, y1 + 1 } };
+                POINT pD[3] = { { cx - 3, y2 - 1 }, { cx, y2 + 2 }, { cx + 3, y2 - 1 } };
+                Polygon(hdc, pU, 3);
+                Polygon(hdc, pD, 3);
+            } else {
+                int cy = h / 2;
+                int x1 = btnSz / 2;
+                int x2 = w - btnSz + btnSz / 2;
+                POINT pL[3] = { { x1 + 1, cy - 3 }, { x1 - 2, cy }, { x1 + 1, cy + 3 } };
+                POINT pR[3] = { { x2 - 1, cy - 3 }, { x2 + 2, cy }, { x2 - 1, cy + 3 } };
+                Polygon(hdc, pL, 3);
+                Polygon(hdc, pR, 3);
+            }
+            SelectObject(hdc, oB);
+            SelectObject(hdc, oP);
+            DeleteObject(arrBr);
+            DeleteObject(arrPen);
+
+            // Draggable thumb: clearly visible slate-grey (#54545E, hover #6E6E7A)
+            if (hasInfo && !unavailable && sbi.xyThumbBottom > sbi.xyThumbTop) {
+                int t1 = sbi.xyThumbTop;
+                int t2 = sbi.xyThumbBottom;
+                if (t1 < btnSz) t1 = btnSz;
+                if (t2 > trackLen - btnSz) t2 = trackLen - btnSz;
+                if (t2 > t1) {
+                    int pad = ((isVert ? w : h) >= 12) ? 2 : 1;
+                    RECT rcThumb = isVert
+                        ? RECT{ pad, t1 + 1, w - pad, t2 - 1 }
+                        : RECT{ t1 + 1, pad, t2 - 1, h - pad };
+                    if (rcThumb.right <= rcThumb.left) { rcThumb.left = 1; rcThumb.right = w - 1; }
+                    if (rcThumb.bottom <= rcThumb.top) { rcThumb.top = 1; rcThumb.bottom = h - 1; }
+
+                    bool thumbActive = hovered || ((sbi.rgstate[3] & (STATE_SYSTEM_HOTTRACKED | STATE_SYSTEM_PRESSED)) != 0);
+                    COLORREF thumbCol = thumbActive ? RGB(0x70, 0x70, 0x7C) : RGB(0x52, 0x52, 0x5C);
+                    HBRUSH thumbBr = CreateSolidBrush(thumbCol);
+                    RawFillRect(hdc, &rcThumb, thumbBr);
+                    DeleteObject(thumbBr);
+                }
+            }
+
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN:
+        case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+        case WM_ENABLE:
+        case SBM_SETPOS:
+        case SBM_SETRANGE:
+        case SBM_SETRANGEREDRAW:
+        case SBM_SETSCROLLINFO: {
+            LRESULT r = DefSubclassProc(hwnd, msg, wParam, lParam);
+            InvalidateRect(hwnd, nullptr, FALSE);
+            return r;
+        }
+
+        case WM_NCDESTROY:
+            gInSubclassInternal = true;
+            RemoveWindowSubclass(hwnd, DarkScrollBarSubclassProc, kScrollBarSubclassId);
+            gInSubclassInternal = false;
+            break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
 static LRESULT CALLBACK DarkComboBoxSubclassProc(
     HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
     UINT_PTR /*uIdSubclass*/, DWORD_PTR /*dwRefData*/)
@@ -1284,8 +1430,8 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
 
         case WM_CTLCOLORSCROLLBAR: {
             HDC hdc = reinterpret_cast<HDC>(wParam);
-            SetBkColor(hdc, gColSurface);
-            return reinterpret_cast<LRESULT>(gBrushSurface);
+            SetBkColor(hdc, gColInput);
+            return reinterpret_cast<LRESULT>(gBrushInput);
         }
 
         case WM_NOTIFY: {
@@ -1500,8 +1646,8 @@ static LRESULT CALLBACK DarkTabSubclassProc(
     }
     if (msg == WM_CTLCOLORSCROLLBAR) {
         HDC hdc = reinterpret_cast<HDC>(wParam);
-        SetBkColor(hdc, gColSurface);
-        return reinterpret_cast<LRESULT>(gBrushSurface);
+        SetBkColor(hdc, gColInput);
+        return reinterpret_cast<LRESULT>(gBrushInput);
     }
     if (msg == WM_NCDESTROY) {
         gInSubclassInternal = true;
@@ -1922,8 +2068,11 @@ static void StyleWindowDark(HWND hwnd) {
                 SetWindowTheme(hwnd, L"", L"");
                 SafeSetWindowSubclass(hwnd, DarkUpDownSubclassProc, kUpDownSubclassId, 0);
             } else if (_wcsicmp(cls, L"Edit") == 0 || _wcsicmp(cls, L"ListBox") == 0 ||
-                       _wcsicmp(cls, L"ComboLBox") == 0 || _wcsicmp(cls, L"ScrollBar") == 0) {
+                       _wcsicmp(cls, L"ComboLBox") == 0) {
                 SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
+            } else if (_wcsicmp(cls, L"ScrollBar") == 0) {
+                SetWindowTheme(hwnd, L"", L"");
+                SafeSetWindowSubclass(hwnd, DarkScrollBarSubclassProc, kScrollBarSubclassId, 0);
             } else if (_wcsicmp(cls, L"Scintilla") == 0) {
                 SetWindowTheme(hwnd, L"DarkMode_Explorer", nullptr);
                 SafeSetWindowSubclass(hwnd, DarkScintillaSubclassProc, kScintillaSubclassId, 1);
@@ -2154,6 +2303,7 @@ static void StripOurSubclassesBeforeRehook(HWND hwnd) {
     RemoveWindowSubclass(hwnd, DarkUpDownSubclassProc,      kUpDownSubclassId);
     RemoveWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId);
     RemoveWindowSubclass(hwnd, DarkScintillaSubclassProc,   kScintillaSubclassId);
+    RemoveWindowSubclass(hwnd, DarkScrollBarSubclassProc,   kScrollBarSubclassId);
     RemoveWindowSubclass(hwnd, DarkHeaderSubclassProc,      kHeaderSubclassId);
     RemoveWindowSubclass(hwnd, DarkTabSubclassProc,         kTabSubclassId);
     RemoveWindowSubclass(hwnd, DarkContainerSubclassProc,   kContainerSubclassId);

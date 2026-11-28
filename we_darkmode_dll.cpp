@@ -1282,6 +1282,12 @@ static LRESULT CALLBACK DarkContainerSubclassProc(
             return reinterpret_cast<LRESULT>(gBrushInput);
         }
 
+        case WM_CTLCOLORSCROLLBAR: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            SetBkColor(hdc, gColSurface);
+            return reinterpret_cast<LRESULT>(gBrushSurface);
+        }
+
         case WM_NOTIFY: {
             auto* nmh = reinterpret_cast<NMHDR*>(lParam);
             if (nmh && nmh->code == NM_CUSTOMDRAW) {
@@ -1492,12 +1498,28 @@ static LRESULT CALLBACK DarkTabSubclassProc(
         SetBkColor(hdc, gColBg);
         return reinterpret_cast<LRESULT>(gBrushBg);
     }
+    if (msg == WM_CTLCOLORSCROLLBAR) {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetBkColor(hdc, gColSurface);
+        return reinterpret_cast<LRESULT>(gBrushSurface);
+    }
     if (msg == WM_NCDESTROY) {
         gInSubclassInternal = true;
         RemoveWindowSubclass(hwnd, DarkTabSubclassProc, kTabSubclassId);
         gInSubclassInternal = false;
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+static bool IsStaticShapeType(DWORD st) {
+    return st == SS_WHITERECT || st == SS_GRAYRECT || st == SS_BLACKRECT ||
+           st == SS_WHITEFRAME || st == SS_GRAYFRAME || st == SS_BLACKFRAME ||
+           st == SS_ETCHEDFRAME || st == SS_ETCHEDHORZ || st == SS_ETCHEDVERT;
+}
+
+static bool HasStaticNcBorder(LONG_PTR style, LONG_PTR exStyle) {
+    return (style & (WS_THICKFRAME | WS_BORDER | SS_SUNKEN)) != 0 ||
+           (exStyle & (WS_EX_STATICEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME)) != 0;
 }
 
 static LRESULT CALLBACK DarkStaticShapeSubclassProc(
@@ -1510,13 +1532,81 @@ static LRESULT CALLBACK DarkStaticShapeSubclassProc(
         gInSubclassInternal = false;
         return DefSubclassProc(hwnd, msg, wParam, lParam);
     }
-    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_NCPAINT) {
+        LONG_PTR fullStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (HasStaticNcBorder(fullStyle, exStyle)) {
+            HDC hdc = GetWindowDC(hwnd);
+            if (hdc) {
+                RECT rcWin = {};
+                GetWindowRect(hwnd, &rcWin);
+                int w = rcWin.right - rcWin.left;
+                int h = rcWin.bottom - rcWin.top;
+                RECT rc = { 0, 0, w, h };
+
+                bool isEmptyDivider = ((fullStyle & WS_THICKFRAME) != 0) && (GetWindowTextLengthW(hwnd) == 0);
+                if (!isEmptyDivider) {
+                    // Status bar panes (SS_SUNKEN / WS_BORDER / WS_EX_STATICEDGE) or bordered text statics:
+                    // Paint only the non-client border ring dark so interior text/images remain untouched
+                    RECT rcCli = {};
+                    GetClientRect(hwnd, &rcCli);
+                    POINT pt = { 0, 0 };
+                    ClientToScreen(hwnd, &pt);
+                    OffsetRect(&rcCli, pt.x - rcWin.left, pt.y - rcWin.top);
+                    int saved = SaveDC(hdc);
+                    ExcludeClipRect(hdc, rcCli.left, rcCli.top, rcCli.right, rcCli.bottom);
+                    RawFillRect(hdc, &rc, gBrushBg);
+                    Draw1PxBorder(hdc, rc, gColBorder);
+                    RestoreDC(hdc, saved);
+                } else {
+                    // Blizzard COsDivider splitter bar (STATIC + WS_THICKFRAME):
+                    // Replace Windows' bright white thickframe border with sleek dark divider
+                    RawFillRect(hdc, &rc, gBrushBg);
+                    if (w <= 16 && h > w) {
+                        RECT rLine = { w / 2, 0, w / 2 + 1, h };
+                        RawFillRect(hdc, &rLine, gBrushBorder);
+                    } else if (h <= 16 && w > h) {
+                        RECT rLine = { 0, h / 2, w, h / 2 + 1 };
+                        RawFillRect(hdc, &rLine, gBrushBorder);
+                    } else {
+                        Draw1PxBorder(hdc, rc, gColBorder);
+                    }
+                }
+                ReleaseDC(hwnd, hdc);
+            }
+            return 0;
+        }
+        return DefSubclassProc(hwnd, msg, wParam, lParam);
+    }
+    if (msg == WM_ERASEBKGND) {
+        LONG_PTR fullStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        DWORD st = static_cast<DWORD>(fullStyle & SS_TYPEMASK);
+        bool isEmptyDivider = ((fullStyle & WS_THICKFRAME) != 0) && (GetWindowTextLengthW(hwnd) == 0);
+        if (!isEmptyDivider && !IsStaticShapeType(st)) {
+            return DefSubclassProc(hwnd, msg, wParam, lParam);
+        }
+        return 1;
+    }
     if (msg == WM_PAINT) {
+        LONG_PTR fullStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        DWORD st = static_cast<DWORD>(fullStyle & SS_TYPEMASK);
+        bool isEmptyDivider = ((fullStyle & WS_THICKFRAME) != 0) && (GetWindowTextLengthW(hwnd) == 0);
+        if (isEmptyDivider) {
+            PAINTSTRUCT ps = {};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            RECT rc = {};
+            GetClientRect(hwnd, &rc);
+            RawFillRect(hdc, &rc, gBrushBg);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        if (!IsStaticShapeType(st)) {
+            return DefSubclassProc(hwnd, msg, wParam, lParam);
+        }
         PAINTSTRUCT ps = {};
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc = {};
         GetClientRect(hwnd, &rc);
-        DWORD st = static_cast<DWORD>(GetWindowLongPtrW(hwnd, GWL_STYLE) & SS_TYPEMASK);
         if (st == SS_ETCHEDHORZ) {
             RawFillRect(hdc, &rc, gBrushBg);
             RECT rLine = { rc.left, rc.top, rc.right, rc.top + 1 };
@@ -1818,9 +1908,8 @@ static void StyleWindowDark(HWND hwnd) {
                 SafeSetWindowSubclass(hwnd, DarkContainerSubclassProc, kContainerSubclassId, 0);
             } else if (_wcsicmp(cls, L"Static") == 0) {
                 DWORD st = static_cast<DWORD>(style & SS_TYPEMASK);
-                if (st == SS_WHITERECT || st == SS_GRAYRECT || st == SS_BLACKRECT ||
-                    st == SS_WHITEFRAME || st == SS_GRAYFRAME || st == SS_BLACKFRAME ||
-                    st == SS_ETCHEDFRAME || st == SS_ETCHEDHORZ || st == SS_ETCHEDVERT)
+                LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+                if (HasStaticNcBorder(style, exStyle) || IsStaticShapeType(st))
                 {
                     SetWindowTheme(hwnd, L"", L"");
                     SafeSetWindowSubclass(hwnd, DarkStaticShapeSubclassProc, kStaticSubclassId, 0);
